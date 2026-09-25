@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bedrock Dialogue Maker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">&#9635;</span>
+    <div>
+      <div class="title">Bedrock Dialogue Maker</div>
+      <div class="subtitle">NPC dialogue for Minecraft <b>Bedrock Edition</b></div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="editor" class="active">1. Build</button>
+    <button data-tab="map">2. Branch map</button>
+    <button data-tab="export">3. Get commands</button>
+  </nav>
+  <div class="actions">
+    <button id="btnPlay" class="primary">&#9654; Test play</button>
+    <button id="btnPassword">&#128274; Password wizard</button>
+    <button id="btnMenu">Project &#9662;</button>
+    <div class="menu hidden" id="projectMenu">
+      <button data-act="new">New empty project</button>
+      <button data-act="example">Load example project</button>
+      <button data-act="save">Save project file (.json)</button>
+      <button data-act="open">Open project file…</button>
+    </div>
+    <input type="file" id="fileInput" accept=".json,application/json" hidden>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main" id="main"></main>
+</div>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-card" id="modalCard"></div>
+</div>
+<div class="toast hidden" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
