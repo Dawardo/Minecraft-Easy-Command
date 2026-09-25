@@ -91,7 +91,6 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 .btn-card .num { font-weight: 700; color: var(--accent); width: 20px; }
 .btn-card details { margin-top: 8px; }
 .btn-card summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-.cond-box { border-left: 2px solid var(--blue); padding-left: 10px; margin-top: 6px; }
 
 .preview-box {
   background: #0e0f12; border: 1px solid var(--line); border-radius: 6px; padding: 10px;
@@ -120,8 +119,6 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 .cmd-list code { flex: 1; background: #0e0f12; border: 1px solid var(--line); padding: 6px 8px; border-radius: 5px; font-family: Consolas, monospace; font-size: 12.5px; word-break: break-all; }
 .steps { padding-left: 20px; }
 .steps li { margin-bottom: 6px; }
-.mode-pick { display: flex; gap: 10px; margin-bottom: 14px; }
-.mode-pick button.active { border-color: var(--accent); color: var(--accent); }
 
 .map-wrap { background: #121317; border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
 .map-wrap svg text { fill: var(--text); font-size: 12px; font-family: "Segoe UI", sans-serif; }

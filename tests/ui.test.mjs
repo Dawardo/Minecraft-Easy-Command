@@ -32,39 +32,27 @@ check(issues.length === 0, 'example project has no errors ' + JSON.stringify(iss
 const press = async label => page.locator('.mc-btns button', { hasText: new RegExp(`^${label}$`) }).click();
 const sceneTag = async () => (await page.locator('.mc-dialog .hint .code').textContent().catch(() => null));
 await page.click('#btnPlay');
-check(await sceneTag() === 'guard_intro', 'guard starts at guard_intro');
-await press('Enter code');
+check(await sceneTag() === 'guard_intro', 'NPC starts at guard_intro');
+await press('I\'m a friend'); await press('Yes please');
+check(await sceneTag() === 'guard_hint', 'branch: friend -> hint');
+await press('Back'); await press('Enter code');
 check(await sceneTag() === 'pw_castle_1', 'enter code -> pw_castle_1');
 await press('3'); await press('1'); await press('4');
 check(await sceneTag() === 'guard_welcome', 'code 3,1,4 unlocks -> guard_welcome');
-check(await page.locator('.pill', { hasText: 'castle_access' }).count() === 1, 'player got castle_access tag');
 await page.click('#playTalk');
-check(await sceneTag() === 'guard_welcome', 'guard remembers: next talk starts at guard_welcome');
-
-// ---- merchant conditional branch ----
-await page.selectOption('#playNpc', { label: 'Merchant' });
-await page.click('#playTalk');
-await press('Any reward\\?');
-check(await sceneTag() === 'merchant_vip', 'tag check branch: player with tag -> merchant_vip');
+check(await sceneTag() === 'guard_welcome', 'NPC remembers: next talk starts at guard_welcome');
 
 // ---- wrong password with a fresh player ----
 await page.click('#playReset');
-await page.selectOption('#playNpc', { label: 'Guard' });
-await page.click('#playTalk');
-check(await sceneTag() === 'guard_intro', 'reset player -> guard back to intro');
+check(await sceneTag() === 'guard_intro', 'reset player -> back to intro');
 await press('Enter code');
 await press('2');
 const decoyText = await page.locator('.mc-text').textContent();
 check(await sceneTag() === 'pw_castle_x2' && decoyText.includes('● _ _'), 'wrong first digit -> identical-looking decoy step');
 await press('1'); await press('4');
 check(await sceneTag() === 'pw_castle_fail', 'wrong code ends in fail scene');
-check(await page.locator('.pill', { hasText: 'castle_access' }).count() === 0, 'no tag after wrong code');
 await press('Try again');
 check(await sceneTag() === 'pw_castle_1', 'try again -> step 1');
-await page.selectOption('#playNpc', { label: 'Merchant' });
-await page.click('#playTalk');
-await press('Any reward\\?');
-check(await sceneTag() === 'merchant_intro', 'tag check branch: player without tag -> else branch');
 await page.click('[data-close]');
 
 // ---- build a new project purely through the UI ----
@@ -91,8 +79,7 @@ await page.click('#btnPassword');
 await page.fill('#pwName', 'door');
 await page.fill('#pwSymbols', 'Red, Blue, Green, Gold');
 await page.fill('#pwCode', 'Gold, Red, Red, Blue');
-await page.fill('#pwTag', 'door_open');
-await page.fill('#pwCmds', '/give @initiator diamond 1');
+await page.fill('#pwCmds', '/give @p diamond 1');
 await page.click('#pwGo');
 const proj = await page.evaluate(() => BDM.project);
 const hello = proj.scenes.find(s => s.tag === 'wizard_hello');
@@ -108,7 +95,7 @@ await press('Try again');
 for (const k of ['Gold', 'Red', 'Red', 'Blue']) await press(k);
 check(await sceneTag() === 'pw_door_ok', 'new lock: correct colours open it');
 const log = await page.locator('.play-log').textContent();
-check(log.includes('/give @initiator diamond 1'), 'success command ran');
+check(log.includes('/give @p diamond 1'), 'success command ran');
 await page.click('[data-close]');
 
 // branch map renders every scene
@@ -120,32 +107,29 @@ const errs2 = await page.evaluate(() => BDM.validate().filter(i => i.level === '
 check(errs2.length === 0, 'built project has no errors ' + JSON.stringify(errs2));
 await page.click('[data-tab=export]');
 const setup = await page.locator('.cmd-list code').allTextContents();
-check(setup.some(c => c === '/dialogue change @e[type=npc,tag=npc_1] wizard_hello'), 'setup commands point NPC at first scene');
-const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-click=dlPack]')]);
+check(setup[0] === '/summon npc "Villager Bob" ~ ~ ~' && setup[1] === '/dialogue change @e[type=npc,c=1] wizard_hello', 'setup = summon + dialogue change, no tags');
+const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-click=dlFolder]')]);
 const out = path.resolve('tests/out'); fs.mkdirSync(out, { recursive: true });
 const packPath = path.join(out, dl.suggestedFilename());
 await dl.saveAs(packPath);
-check(packPath.endsWith('.mcpack'), 'downloaded ' + path.basename(packPath));
+check(packPath.endsWith('.zip'), 'downloaded ' + path.basename(packPath));
 const listing = execFileSync('python3', ['-c', `
 import zipfile, json, sys
 z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None
-m = json.loads(z.read('manifest.json')); d = json.loads(z.read('dialogue/dialogue.json'))
+m = json.loads(z.read('My Dialogue Pack/manifest.json')); d = json.loads(z.read('My Dialogue Pack/dialogue/dialogue.json'))
 tags = {s['scene_tag'] for s in d['minecraft:npc_dialogue']['scenes']}
 import re
 for s in d['minecraft:npc_dialogue']['scenes']:
     for b in s.get('buttons', []):
         assert b['commands'], 'empty button'
         for c in b['commands']:
-            mm = re.match(r'/dialogue open @s @initiator(\\[tag=!?[\\w.-]+\\])? (\\S+)$', c)
-            if c.startswith('/dialogue open'): assert mm and mm.group(2) in tags, c
+            assert 'tag' not in c and '@initiator' not in c, c
+            mm = re.match(r'/dialogue open @e\\[type=npc,c=1\\] @p (\\S+)$', c)
+            if c.startswith('/dialogue open'): assert mm and mm.group(1) in tags, c
 print(json.dumps({'files': z.namelist(), 'fv': d['format_version'], 'scenes': len(tags), 'module': m['modules'][0]['type']}))
 `, packPath]).toString();
 console.log('      ' + listing.trim());
-check(listing.includes('"fv": "1.17"') && listing.includes('"module": "data"'), 'mcpack is a valid zip with manifest + dialogue scenes, all links resolve');
-
-// vanilla mode renders
-await page.click('[data-mode=vanilla]');
-check(await page.locator('text=/dialogue open @e\\[type=npc,tag=dlg_pw_door_2,c=1\\] @initiator/').count() > 0, 'no-add-on mode links scene NPCs by tag');
+check(listing.includes('"fv": "1.17"') && listing.includes('"module": "data"'), 'zip holds a pack folder; every button uses @p, no tags, all scene links resolve');
 
 check(errors.length === 0, 'no page errors ' + errors.join(' | '));
 await page.screenshot({ path: path.join(out, 'export.png'), fullPage: true });
