@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Launcher for mc.py: finds Python 3.8+ (skipping the Microsoft Store "python" stub). Set MC_PYTHON to override.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONIOENCODING=utf-8
+if [ -n "$MC_PYTHON" ]; then exec "$MC_PYTHON" "$DIR/mc.py" "$@"; fi
+for cand in python3 python "py -3"; do
+  if $cand -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" >/dev/null 2>&1; then
+    exec $cand "$DIR/mc.py" "$@"
+  fi
+done
+echo "Python 3.8+ not found. Install it (Windows: winget install -e --id Python.Python.3.12), then try again." >&2
+exit 127

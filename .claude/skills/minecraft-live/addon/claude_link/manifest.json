@@ -1,0 +1,25 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Claude Link",
+    "description": "Lets Claude see your world precisely (blocks, heights, nearby mobs) through the mc bridge. Read-only.",
+    "uuid": "426041e5-2162-4806-9c1a-91c875a8d01f",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 21, 120]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "entry": "scripts/main.js",
+      "uuid": "d9d33ed4-a144-497d-8420-1e0f576e96a9",
+      "version": [1, 0, 0]
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "2.3.0"
+    }
+  ]
+}

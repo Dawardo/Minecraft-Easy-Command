@@ -1,0 +1,63 @@
+name: cottage
+# 7 x 5 cottage: cobblestone base, log corners, plank walls, glass windows, door in the front (south) wall,
+# oak stair roof. Front = last row of each layer = south; `mc build cottage.txt --here` turns it to face you.
+legend:
+  C = cobblestone
+  L = oak_log
+  P = oak_planks
+  G = glass_pane
+  D = wooden_door["minecraft:cardinal_direction"="east"]   # "east" = a door you walk through going north (see orientation.md)
+  N = oak_stairs["weirdo_direction"=3]
+  S = oak_stairs["weirdo_direction"=2]
+  B = oak_slab
+  T = torch["torch_facing_direction"="top"]
+  . = air
+
+layer 0:
+CCCCCCC
+CCCCCCC
+CCCCCCC
+CCCCCCC
+CCCCCCC
+
+layer 1:
+LPPPPPL
+P.....P
+P.....P
+P.....P
+LPPDPPL
+
+layer 2:
+LPGGGPL
+P.....P
+G.....G
+P.....P
+LPGDGPL
+
+layer 3:
+LPPPPPL
+P.....P
+P.....P
+P.....P
+LPPPPPL
+
+layer 4:
+SSSSSSS
+PPPPPPP
+BBBBBBB
+PPPPPPP
+NNNNNNN
+
+layer 5:
+.......
+SSSSSSS
+PPPPPPP
+NNNNNNN
+.......
+
+layer 6:
+.......
+.......
+BBBBBBB
+.......
+.......
