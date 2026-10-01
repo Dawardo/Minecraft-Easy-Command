@@ -25,6 +25,7 @@ const INSTRUMENTS = {
   'note.didgeridoo': { label: 'Didgeridoo', center: 42, synth: 'bass' },
 };
 const DRUMS = { kick: 'note.bd', snare: 'note.snare', hat: 'note.hat' };
+const HOLD_MIN = 0.4, HOLD_EVERY = 0.2;   // "Hold long notes": notes this long (s) are replayed this often (s)
 // "Every note": instruments that together cover MIDI 30..102 (F#1..F#7) at exact pitch, two octaves each
 const COVER = ['note.harp', 'note.bass', 'note.guitar', 'note.flute', 'note.bell'];
 /** The first instrument (yours first, then COVER) whose two octaves hold this note, so it plays at its real pitch.
@@ -87,12 +88,15 @@ function buildSong(tracks, s) {
   const stepSec = stepTicks / 20;
   const steps = new Map();
   const stepOf = t => Math.max(0, Math.round(t / stepSec));
-  const put = (layer, t, ev) => {
+  const holds = [];   // long notes to replay ("Hold long notes"), added after every real note
+  const hold = (layer, t, dur, ev) => { if (s.hold && dur >= HOLD_MIN) holds.push({ layer, t, dur, ev }); };
+  const put = (layer, t, ev, dur = 0) => {
     const k = stepOf(t);
     if (!steps.has(k)) steps.set(k, []);
     const row = steps.get(k);
     if (row.some(e => e.layer === layer)) return; // one block per layer per step (first one wins)
     row.push({ layer, ...ev });
+    hold(layer, t, dur, ev);
   };
   // chords (e.g. from a MIDI piano part): melody keeps the top note, bass the bottom note
   const byPitch = (notes, dir) => [...notes].sort((a, b) => a.t - b.t || dir * (a.midi - b.midi));
@@ -109,7 +113,9 @@ function buildSong(tracks, s) {
       if (!steps.has(k)) steps.set(k, []);
       const row = steps.get(k);
       if (row.some(e => e.sound === p.sound && e.midi === p.midi)) continue;
-      row.push({ layer: m < 54 ? 1 : 0, ...p, orig: n.midi, vol: n.midi === top.get(k) ? 1 : m < 54 ? 0.9 : 0.75 });
+      const ev = { layer: m < 54 ? 1 : 0, ...p, orig: n.midi, vol: n.midi === top.get(k) ? 1 : m < 54 ? 0.9 : 0.75 };
+      row.push(ev);
+      hold(ev.layer, n.t, n.dur, ev);
     }
     if (s.mode3 === 'drums' || s.mode3 === 'auto') {
       for (const d of tracks.drums) {
@@ -120,8 +126,8 @@ function buildSong(tracks, s) {
       }
     }
   } else {
-  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 });
-  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 });
+  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 }, n.dur);
+  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 }, n.dur);
   // layer 3: drums where the song has drums; harmony fills the rest (in "auto"), or one of them only
   if (s.mode3 === 'drums' || s.mode3 === 'auto') {
     for (const d of tracks.drums) put(2, d.t, { sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
@@ -130,11 +136,22 @@ function buildSong(tracks, s) {
     for (const n of fitToInstrument(byPitch(tracks.harmony, -1), s.inst3, s.transpose)) {
       const mel = steps.get(stepOf(n.t))?.find(e => e.layer === 0);
       if (mel && (n.midi >= mel.orig || (mel.orig - n.midi) % 12 === 0)) continue; // harmony sits below the tune, not doubling it
-      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 });
+      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 }, n.dur);
     }
   }
   }
 
+  // Hold long notes: replay each long note every HOLD_EVERY s while it lasts, softer each time. Real notes
+  // were placed first, so a replay only goes where that layer (Simple) / that exact note (Every note) is free.
+  for (const h of holds) {
+    for (let i = 1, t = h.t + HOLD_EVERY; t < h.t + h.dur - 0.05; i++, t += HOLD_EVERY) {
+      const k = stepOf(t);
+      if (!steps.has(k)) steps.set(k, []);
+      const row = steps.get(k);
+      if (s.detail === 'full' ? row.some(e => e.sound === h.ev.sound && e.midi === h.ev.midi) : row.some(e => e.layer === h.layer)) continue;
+      row.push({ ...h.ev, layer: h.layer, vol: +(h.ev.vol * Math.max(0.5, 1 - 0.1 * i)).toFixed(2), hold: true });
+    }
+  }
   const keys = [...steps.keys()].sort((a, b) => a - b);
   let prev = null;
   const rows = keys.map(k => {
@@ -446,6 +463,7 @@ function readSettings() {
     target: $('#target').value,
     build: segValue('build'),
     detail: segValue('detail'),
+    hold: $('#hold').checked,
     slab: {
       x: Math.round(+$('#slabX').value || 0), y: Math.round(+$('#slabY').value || 0), z: Math.round(+$('#slabZ').value || 0),
       w: Math.max(1, Math.min(64, Math.round(+$('#slabW').value || 16))), d: Math.max(1, Math.min(64, Math.round(+$('#slabD').value || 16))),

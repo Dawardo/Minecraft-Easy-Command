@@ -170,6 +170,17 @@ const full = await page.evaluate(() => {
 });
 check(full.placed === full.unique && full.wrong === 0 && full.inRange, `every note: all ${full.unique} chord and melody notes placed, each at its exact pitch (${full.wrong} moved)`);
 check(/\d+ blocks for this part, about .+ to auto-build/.test(full.info) && !(await page.locator('#src1').isVisible()), 'every note: shows blocks and build time, hides the per-layer track pickers');
+check(!(await page.locator('#hold').isChecked()) && !(await page.evaluate(() => MM.state.song.rows.some(x => x.events.some(e => e.hold)))), 'hold long notes is off by default: one pluck per note');
+const before = await page.evaluate(() => MM.state.steps.length);
+r = await change(() => page.check('#hold'));
+const held = await page.evaluate(() => {
+  const s = MM.state.settings, rows = MM.state.song.rows;
+  const src = MM.state.midi.tonal.flatMap(t => t.notes).map(n => ({ a: n.time - s.start, b: n.time - s.start + n.duration, m: n.midi + s.transpose }));
+  const reps = rows.flatMap(x => x.events.filter(e => e.hold).map(e => ({ t: x.time, m: e.midi, vol: e.vol })));
+  return { n: reps.length, blocks: MM.state.steps.length, inside: reps.every(r => src.some(n => n.m === r.m && r.t > n.a && r.t < n.b + 0.05)), drums: rows.some(x => x.events.some(e => e.hold && e.drum)) };
+});
+check(held.n > 0 && held.blocks === before + held.n && held.inside && !held.drums, `hold on: ${held.n} replays, each inside a long note of the same pitch, no drums replayed`);
+r = await change(() => page.uncheck('#hold'));
 r = await change(() => page.click('#detail [data-v=simple]'));
 
 // ---- 7. slab (auto-builder) mode ----

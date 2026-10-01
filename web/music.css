@@ -61,6 +61,7 @@ body:not(.slab-mode) .slab-only { display: none !important; }
 .snip-row button { white-space: nowrap; }
 .snip-row .spacer { flex: 1; }
 #snipInfo { white-space: nowrap; }
+.hold-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .seek-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 #seek { flex: 1; accent-color: var(--accent); }
 #seekTime { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: 12px; }
