@@ -17,7 +17,8 @@
 #>
 param(
   [Parameter(Position = 0)][string]$Plan,
-  [ValidateSet('250', '500', '750', '1000')][string]$Speed = '',   # extra delay after every action, in ms
+  [ValidateSet('125', '250', '500', '750')][string]$Speed = '',    # extra delay after every action, in ms
+  [ValidateSet('type', 'paste')][string]$Text = '',             # how commands go in: typed key by key, or pasted
   [int]$Limit = -1,
   [switch]$Recalibrate,            # show the builder where to click again
   [switch]$Step,                   # step-by-step: press F8 before every action (for finding problems)
@@ -157,12 +158,13 @@ namespace Bdm {
 }
 '@
   [Bdm.Win]::UseRealPixels()
+  Add-Type -AssemblyName System.Windows.Forms   # clipboard, for pasting
 }
 
 $VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010 }
 
-# Speed = an extra delay (250 / 500 / 750 / 1000 ms) added to every wait between actions
+# Speed = an extra delay (125 / 250 / 500 / 750 ms) added to every wait between actions
 $script:gap = 500
 function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ($ms + $script:gap) } }
 function Log([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
@@ -179,8 +181,38 @@ function Combo([int]$vk) {
     [Bdm.Win]::Key($VK.Ctrl, $true, $false); Start-Sleep -Milliseconds 30
   }
 }
-# Types text into whatever text box has focus, one key at a time (Shift when needed).
+# Puts text on the clipboard and reads it back, retrying while another program (a clipboard manager,
+# a remote desktop) holds the clipboard.
+function SetClip([string]$text) {
+  for ($try = 0; $try -lt 5; $try++) {
+    try {
+      [Windows.Forms.Clipboard]::SetText($text)
+      if ([Windows.Forms.Clipboard]::GetText() -ceq $text) { return }
+    } catch {
+      try { Set-Clipboard -Value $text; if ((Get-Clipboard -Raw) -ceq $text) { return } } catch {}
+    }
+    Start-Sleep -Milliseconds 100
+  }
+  throw 'Could not put the command on the clipboard (another program keeps it busy, for example a clipboard manager).'
+}
+# Ctrl+V like a person presses it: Ctrl held down a moment before and after V, so Minecraft sees Ctrl
+# down when V arrives (it checks the keys once per frame).
+function PasteKeys {
+  [Bdm.Win]::Key($VK.Ctrl, $false, $false); Start-Sleep -Milliseconds 60
+  [Bdm.Win]::Key($VK.V, $false, $false); Start-Sleep -Milliseconds 60
+  [Bdm.Win]::Key($VK.V, $true, $false); Start-Sleep -Milliseconds 60
+  [Bdm.Win]::Key($VK.Ctrl, $true, $false); Start-Sleep -Milliseconds 60
+}
+# Puts text into whatever text box has focus: pasted (Text = paste), or typed one key at a time
+# (Shift when needed).
+$script:paste = $false
 function TypeText([string]$text) {
+  if ($script:paste) {
+    Act "paste: $text"
+    if ($DryRun) { return }
+    SetClip $text; PasteKeys; Start-Sleep -Milliseconds 100
+    return
+  }
   Act "type: $text"
   if ($DryRun) { return }
   foreach ($c in $text.ToCharArray()) {
@@ -401,7 +433,6 @@ function ShiftPlan([int]$dx, [int]$dy, [int]$dz) {
   if ($dx -eq 0 -and $dy -eq 0 -and $dz -eq 0) { return }
   $script:blocks = @($script:blocks | ForEach-Object { [pscustomobject]@{ x = $_.x + $dx; y = $_.y + $dy; z = $_.z + $dz; delay = $_.delay; command = $_.command } })
   $script:levels = @($script:levels | ForEach-Object { [pscustomobject]@{ y = $_.y + $dy; kind = $_.kind; fill = (ShiftCoords $_.fill $dx $dy $dz) } })
-  $p.clear = @(@($p.clear) | ForEach-Object { ShiftCoords $_ $dx $dy $dz })
   $p.start = ShiftCoords $p.start $dx $dy $dz
   $p.stop = ShiftCoords $p.stop $dx $dy $dz
   $p.tickingArea = ShiftCoords $p.tickingArea $dx $dy $dz
@@ -423,13 +454,23 @@ $gapName = $Speed
 if (-not $gapName) {
   $gapName = '500'
   if (-not $Yes) {
-    $s = Prompt 'Speed (extra delay after every action): 1 = 250 ms, 2 = 500 ms (default), 3 = 750 ms, 4 = 1000 ms'
-    $pick = @{ '1' = '250'; '2' = '500'; '3' = '750'; '4' = '1000' }[$s.Trim()]
+    $s = Prompt 'Speed (extra delay after every action): 1 = 125 ms, 2 = 250 ms, 3 = 500 ms (default), 4 = 750 ms'
+    $pick = @{ '1' = '125'; '2' = '250'; '3' = '500'; '4' = '750' }[$s.Trim()]
     if ($pick) { $gapName = $pick }
   }
 }
 $script:gap = [int]$gapName
 Log "Speed: $($script:gap) ms extra delay after every action"
+$textMode = $Text
+if (-not $textMode) {
+  $textMode = 'type'
+  if (-not $Yes) {
+    $s = Prompt 'Put commands in by: 1 = typing key by key (default, works), 2 = pasting (much faster: try it with a test run)'
+    if ($s.Trim() -eq '2') { $textMode = 'paste' }
+  }
+}
+$script:paste = ($textMode -eq 'paste')
+Log "Commands are $(if ($script:paste) { 'pasted' } else { 'typed key by key' })."
 
 # progress
 $progFile = "$planPath.progress.json"
@@ -503,10 +544,6 @@ if (-not $DryRun) { for ($n = 3; $n -ge 1; $n--) { Log "  starting in $n..." 'Ye
 if (-not $DryRun) { [Bdm.Win]::StartKillWatch() }   # from here on F9 stops everything at once
 if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run was killed with Shift or Ctrl held
 
-$fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)
-if ($fresh -and $p.clear -and (Ask 'Clear the build space first (fills the box with air)? Only say yes if nothing there matters.' $false)) {
-  foreach ($c in @($p.clear)) { Chat $c }
-}
 
 # levels must exist before calibration can open the first block
 $firstLevel = $levels | Where-Object { $_.kind -eq 'command' } | Select-Object -First 1
