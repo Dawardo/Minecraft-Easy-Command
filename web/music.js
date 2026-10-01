@@ -32,6 +32,7 @@ const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const midiToHz = m => 440 * Math.pow(2, (m - 69) / 12);
+const fmtDuration = sec => (sec >= 3600 ? `${Math.floor(sec / 3600)} h ${Math.round((sec % 3600) / 60)} min` : `${Math.max(1, Math.round(sec / 60))} min`);
 const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const noteName = m => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
@@ -120,9 +121,66 @@ function repeaters(ticks) {
   return out;
 }
 
+const FILL_LIMIT = 32768;    // Bedrock /fill: max blocks per command
+const MAX_DELAY = 99999;     // Bedrock command block "Delay in Ticks" limit
+
+/**
+ * Slab layout: every note is an Impulse command block with Delay in Ticks = its time.
+ * Command layers are stacked upward in pairs around a glass layer: C G C C G C …
+ * Start = one /fill that swaps all glass for redstone blocks, so every block is powered on the same tick.
+ */
+function slabLayout(song) {
+  const s = song.settings, { x, y, z, w, d } = s.slab;
+  const first = song.rows.length ? song.rows[0].step : 0;
+  const notes = song.rows.flatMap(r => r.events.map(e => ({ cmd: e.cmd, delay: (r.step - first) * s.ticks * 2, time: r.time, layer: e.layer })));
+  const per = w * d, layers = Math.max(1, Math.ceil(notes.length / per));
+  const cmdY = k => y + Math.floor(k / 2) * 3 + (k % 2) * 2;
+  const levels = [];
+  for (let k = 0; k < layers; k++) {
+    levels.push({ y: cmdY(k), kind: 'command' });
+    if (k % 2 === 0) levels.push({ y: cmdY(k) + 1, kind: 'glass' });
+  }
+  levels.sort((a, b) => a.y - b.y);
+  const height = levels[levels.length - 1].y - y + 1;
+  const x2 = x + w - 1, z2 = z + d - 1, y2 = y + height - 1;
+  const box = `${x} ${y} ${z} ${x2} ${y2} ${z2}`;
+  for (const l of levels) l.fill = `/fill ${x} ${l.y} ${z} ${x2} ${l.y} ${z2} ${l.kind === 'command' ? 'command_block' : 'glass'}`;
+  const blocks = notes.map((n, i) => {
+    const k = Math.floor(i / per), j = i % per;
+    return { ...n, x: x + (j % w), y: cmdY(k), z: z + Math.floor(j / w) };
+  });
+  const volume = w * d * height;
+  // clearing the space (plus 3 blocks of headroom for the builder), split to respect the /fill limit
+  const sliceH = Math.max(1, Math.floor(FILL_LIMIT / per));
+  const clear = [];
+  for (let a = y; a <= y2 + 3; a += sliceH) clear.push(`/fill ${x} ${a} ${z} ${x2} ${Math.min(y2 + 3, a + sliceH - 1)} ${z2} air`);
+  const problems = [];
+  if (volume > FILL_LIMIT) problems.push(`The slab is ${volume} blocks; Bedrock's /fill can only do ${FILL_LIMIT} at once, so Start would need several commands. Use a shorter part of the song.`);
+  const maxDelay = notes.reduce((m, n) => Math.max(m, n.delay), 0);
+  if (maxDelay > MAX_DELAY) problems.push(`The last note needs Delay ${maxDelay}, but Bedrock allows at most ${MAX_DELAY} (about 83 minutes).`);
+  if (y < -64 || y2 + 3 > 319) problems.push(`The slab goes from Y ${y} to ${y2}; Bedrock worlds only go from -64 to 319. Change the corner Y.`);
+  const name = (state.fileName.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9]+/g, '_').slice(0, 24) || 'song');
+  return {
+    blocks, levels, layers, height, volume, box, maxDelay, problems, clear,
+    start: `/fill ${box} redstone_block replace glass`,
+    stop: `/fill ${box} glass replace redstone_block`,
+    tickingArea: `/tickingarea add ${x} ${y} ${z} ${x2} ${y2} ${z2} ${name}`,
+    gamerule: '/gamerule commandblockoutput false',
+  };
+}
+
 /** Flat list of blocks to place, in order, with build instructions. */
 function buildSteps(song) {
   const list = [];
+  if (song.settings.build === 'slab') {
+    song.slab = slabLayout(song);
+    let i = 0;
+    song.rows.forEach((r, ri) => r.events.forEach((e, ei) => {
+      const b = song.slab.blocks[i++];
+      list.push({ row: ri, ei, cmd: e.cmd, how: `Impulse · Needs Redstone · Delay in Ticks: ${b.delay}`, wait: 0, pos: b, delay: b.delay });
+    }));
+    return list;
+  }
   const chain = song.settings.build === 'chain';
   song.rows.forEach((r, ri) => {
     r.events.forEach((e, ei) => {
@@ -218,6 +276,10 @@ function readSettings() {
     transpose: Math.max(-12, Math.min(12, Math.round(+$('#transpose').value || 0))),
     target: $('#target').value,
     build: segValue('build'),
+    slab: {
+      x: Math.round(+$('#slabX').value || 0), y: Math.round(+$('#slabY').value || 0), z: Math.round(+$('#slabZ').value || 0),
+      w: Math.max(1, Math.min(64, Math.round(+$('#slabW').value || 16))), d: Math.max(1, Math.min(64, Math.round(+$('#slabD').value || 16))),
+    },
   };
 }
 
@@ -231,6 +293,7 @@ function fillInstruments() {
 }
 /** Grey out what a switched-off layer doesn't use, and show ON/OFF in words. */
 function syncLayers() {
+  document.body.classList.toggle('slab-mode', segValue('build') === 'slab');
   const on2 = $('#on2').checked, on3 = $('#on3').checked, m3 = $('#mode3').value;
   $$('#layer2 select').forEach(e => (e.disabled = !on2));
   $('#mode3').disabled = !on3;
@@ -420,26 +483,31 @@ function renderResult() {
     ].filter(Boolean).join(' + '),
   ];
   const warnings = layerWarnings(s);
-  const chain = s.build === 'chain';
+  const chain = s.build === 'chain', slab = s.build === 'slab' ? song.slab : null;
+  if (slab) warnings.push(...slab.problems);
+  const stepAt = {};
+  state.steps.forEach(st => (stepAt[`${st.row}:${st.ei}`] = st));
   $('#result').innerHTML = `
     <div class="card">
       <div class="row"><h2 style="margin:0">${esc(state.fileName)}</h2><span class="spacer"></span>
         <button id="pOrig">&#9654; Original</button><button class="primary" id="pPrev">&#9654; Minecraft preview</button><button id="pStop">&#9632; Stop</button></div>
       <div class="stats" style="margin-top:10px">
         <div class="stat"><b>${blocks}</b><span>command blocks</span></div>
-        ${chain ? '' : `<div class="stat"><b>${repeaterCount}</b><span>repeaters</span></div>`}
-        <div class="stat"><b>${song.rows.length}</b><span>steps</span></div>
+        ${chain || slab ? '' : `<div class="stat"><b>${repeaterCount}</b><span>repeaters</span></div>`}
+        ${slab ? `<div class="stat"><b>${slab.layers}</b><span>layer${slab.layers > 1 ? 's' : ''} of ${s.slab.w}×${s.slab.d}</span></div>
+          <div class="stat"><b>${slab.height}</b><span>blocks tall</span></div>` : `<div class="stat"><b>${song.rows.length}</b><span>steps</span></div>`}
         <div class="stat"><b>${s.length.toFixed(1)} s</b><span>from ${s.start}s</span></div>
       </div>
       <canvas class="roll" id="roll"></canvas>
       <div class="legend-row">${layers.map((l, i) => l ? `<span><i class="swatch" style="background:${LAYER_COLORS[i]}"></i>${esc(l)}</span>` : '').join('')}</div>
       ${warnings.map(w => `<p class="warnline">&#9888; ${esc(w)}</p>`).join('')}
-      ${blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part or the 2-tick grid.</p>` : ''}
+      ${slab ? `<p class="hint">Auto-build time: about ${fmtDuration(blocks * 3)} (roughly 3 s per block; longer on a laggy Realm). You can stop and resume any time.</p>`
+        : blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part or the 2-tick grid.</p>` : ''}
     </div>
 
     <div class="card">
       <h2>How to build it</h2>
-      ${chain ? `<ol class="steps">
+      ${slab ? slabHowTo(slab, s) : chain ? `<ol class="steps">
           <li>Place command blocks in <b>one straight line</b>, each arrow pointing to the next.</li>
           <li>The first block is <b>Impulse · Needs Redstone</b> with a button on it. All the others are <b>Chain · Always Active</b>.</li>
           <li>Set each block's <b>Delay in Ticks</b> to the number shown (game ticks: 2 per repeater tick).</li>
@@ -463,19 +531,68 @@ function renderResult() {
         <button class="small" id="dlTxt">Download as .txt</button></div>
       <div class="table-wrap" style="margin-top:10px"><table class="steps-table"><thead><tr><th>#</th><th>Time</th><th>Wait</th><th>Command block(s)</th></tr></thead>
       <tbody>${song.rows.map((r, i) => `<tr data-row="${i}"><td>${i + 1}</td><td>${r.time.toFixed(1)}s</td>
-        <td class="wait">${waitText(r.waitTicks, chain, i)}</td>
-        <td>${r.events.map(e => `<div class="c"><i class="swatch" style="background:${LAYER_COLORS[e.layer]}"></i><code>${esc(e.cmd)}</code><button class="small" data-copy="${esc(e.cmd)}">Copy</button></div>`).join('')}</td></tr>`).join('')}
+        <td class="wait">${waitText(r.waitTicks, chain, i, s.build)}</td>
+        <td>${r.events.map((e, ei) => {
+          const st = stepAt[`${i}:${ei}`];
+          const where = st && st.pos ? `<span class="pos">${st.pos.x} ${st.pos.y} ${st.pos.z}</span><span class="dly">delay ${st.delay}</span>` : '';
+          return `<div class="c"><i class="swatch" style="background:${LAYER_COLORS[e.layer]}"></i>${where}<code>${esc(e.cmd)}</code><button class="small" data-copy="${esc(e.cmd)}">Copy</button></div>`;
+        }).join('')}</td></tr>`).join('')}
       </tbody></table></div>
     </div>`;
   $('#pOrig').onclick = playOriginal;
   $('#pPrev').onclick = playPreview;
   $('#pStop').onclick = stopAll;
   $('#dlTxt').onclick = downloadTxt;
+  if ($('#dlPlan')) $('#dlPlan').onclick = downloadPlan;
   drawRoll();
   renderQuick();
 }
 
-function waitText(ticks, chain, i) {
+function slabHowTo(slab, s) {
+  const list = cmds => `<ul class="cmd-list setup">${cmds.map(c => `<li><code>${esc(c)}</code><button class="small" data-copy="${esc(c)}">Copy</button></li>`).join('')}</ul>`;
+  return `
+    <p>Every note is an <b>Impulse · Needs Redstone</b> command block with its own <b>Delay in Ticks</b>. They're laid flat (${s.slab.w}×${s.slab.d}) and stacked upward, with a glass layer between each pair of layers.
+      Start swaps all the glass for redstone blocks, so every block is powered on the same tick and plays when its delay runs out.
+      Box: <span class="pos">${slab.box}</span> (${slab.volume} blocks).</p>
+    <h3>Automatic (recommended)</h3>
+    <ol class="steps">
+      <li>Download the build plan: <button class="primary small" id="dlPlan">&#11015; Download build plan</button></li>
+      <li>Double-click <b>Start-Auto-Builder.bat</b> (next to Start-Music-Maker.bat). It finds the newest plan in your Downloads folder.</li>
+      <li>In Minecraft: Creative, flying, cheats on, near <span class="pos">${s.slab.x} ${s.slab.y} ${s.slab.z}</span>, with nothing in the way. Then follow the builder window.</li>
+    </ol>
+    <h3>Once it's built</h3>
+    ${list([slab.gamerule, slab.tickingArea])}
+    <p class="hint">Start the song (keep the power on: taking it away cancels the notes still waiting):</p>
+    ${list([slab.start])}
+    <p class="hint">Stop / reset (run Start again to replay):</p>
+    ${list([slab.stop])}
+    <details><summary>Build by hand instead</summary>
+      <p class="hint">Clear the space first:</p>${list(slab.clear)}
+      <p class="hint">Then place each level in this order, and fill in every command block of a level (positions and delays are in the list below) before placing the next level:</p>
+      ${list(slab.levels.map(l => l.fill))}
+    </details>`;
+}
+
+/** The plan file the auto-builder (tools/auto-builder.ps1) runs. */
+function downloadPlan() {
+  const song = state.song, slab = song.slab, s = song.settings;
+  const plan = {
+    format: 'bedrock-music-maker/slab-plan', version: 1,
+    song: state.fileName, part: { start: s.start, length: s.length }, createdAt: new Date().toISOString(),
+    corner: { x: s.slab.x, y: s.slab.y, z: s.slab.z }, width: s.slab.w, depth: s.slab.d, height: slab.height,
+    clear: slab.clear,
+    levels: slab.levels.map(l => ({ y: l.y, kind: l.kind, fill: l.fill })),
+    blocks: slab.blocks.map(b => ({ x: b.x, y: b.y, z: b.z, delay: b.delay, command: b.cmd })),
+    start: slab.start, stop: slab.stop, tickingArea: slab.tickingArea, gamerule: slab.gamerule,
+  };
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(plan, null, 1)], { type: 'application/json' }));
+  a.download = (state.fileName.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9]+/g, '_') || 'song') + '.slabplan.json';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function waitText(ticks, chain, i, build) {
+  if (build === 'slab') return '';
   if (i === 0) return 'start';
   if (chain) return `Delay ${ticks * 2}`;
   return `${repeaters(ticks).join(' + ')} <span class="hint">(${ticks} tick${ticks > 1 ? 's' : ''})</span>`;
@@ -490,7 +607,8 @@ function renderQuick() {
   const it = st[p];
   const row = state.song.rows[it.row];
   let before = '';
-  if (it.ei === 0 && it.row > 0) {
+  if (it.pos) before = `Block at <span class="pos">${it.pos.x} ${it.pos.y} ${it.pos.z}</span> · Delay in Ticks: <b>${it.delay}</b> <button class="small" data-copy="${it.delay}">Copy delay</button>`;
+  else if (it.ei === 0 && it.row > 0) {
     before = chain ? `Set <b>Delay in Ticks: ${it.wait * 2}</b>` :
       `First place repeater${repeaters(it.wait).length > 1 ? 's' : ''}: <b>${repeaters(it.wait).join(' + ')}</b> tick${it.wait > 1 ? 's' : ''}, then dust`;
   }
@@ -550,6 +668,17 @@ function drawRoll() {
 
 function downloadTxt() {
   const song = state.song, chain = song.settings.build === 'chain';
+  if (song.slab && song.settings.build === 'slab') {
+    const sl = song.slab;
+    const lines = [`Bedrock Music Maker (slab): ${state.fileName}`, `Box ${sl.box}. Every block: Impulse / Needs Redstone, Delay in Ticks as listed.`,
+      `Start: ${sl.start}`, `Stop:  ${sl.stop}`, '', 'Levels (bottom to top):', ...sl.levels.map(l => '  ' + l.fill), '', 'Blocks:',
+      ...sl.blocks.map((b, i) => `#${i + 1}  ${b.x} ${b.y} ${b.z}  delay ${b.delay}  ${b.cmd}`)];
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/plain' }));
+    a.download = (state.fileName.replace(/\.[^.]+$/, '') || 'song') + '_slab.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    return;
+  }
   const out = [`Bedrock Music Maker: ${state.fileName} (${song.settings.start}s, ${song.settings.length.toFixed(1)}s)`,
     chain ? 'Chain command blocks in a line. First = Impulse/Needs Redstone, rest = Chain/Always Active. "Delay" = Delay in Ticks.'
       : 'Redstone line with repeaters. Each step = a column under the dust: top Impulse/Needs Redstone, extra layers Chain/Always Active below.', ''];
@@ -595,5 +724,5 @@ function init() {
 }
 
 // exposed for automated tests
-window.MM = { state, buildSong, buildSteps, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
+window.MM = { state, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
 init();

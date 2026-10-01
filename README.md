@@ -29,8 +29,38 @@ Bedrock syntax: `/playsound <sound> [player] [x y z] [volume] [pitch] [minimumVo
 
 ### Build styles
 
-- **Repeaters** (default): one redstone line, `button → dust → repeaters → dust → …`. Each step is a column under a piece of dust: the top block is *Impulse · Needs Redstone*, facing down, and extra layers go below it as *Chain · Always Active*, facing down. The page lists the repeaters between steps (each holds 1–4 ticks, 1 tick = 0.1 s).
-- **Chain blocks**: no redstone. One straight line of command blocks. The first is *Impulse · Needs Redstone*, the rest *Chain · Always Active*, using each block's *Delay in Ticks* (2 game ticks per repeater tick).
+- **Repeaters**: one redstone line, `button → dust → repeaters → dust → …`. Each step is a column under a piece of dust: the top block is *Impulse · Needs Redstone*, facing down, and extra layers go below it as *Chain · Always Active*, facing down. The page lists the repeaters between steps (each holds 1–4 ticks, 1 tick = 0.1 s).
+- **Chain blocks**: one straight line of command blocks. The first is *Impulse · Needs Redstone*, the rest *Chain · Always Active*, using *Delay in Ticks* (2 game ticks per repeater tick).
+- **Slab (auto-builder)**: made for Realms and huge songs.
+  - **Blocks:** every note is its own *Impulse · Needs Redstone* block with **Delay in Ticks = the note's time** (20 per second, max 99,999 ≈ 83 min).
+  - **Layout:** blocks are laid flat in a W×D grid you choose from a corner block, stacked upward as command, glass, command, command, glass…
+  - **Start:** `/fill <box> redstone_block replace glass` powers every block on the same tick, and each plays when its delay runs out.
+  - **Stop:** `/fill <box> glass replace redstone_block` removes the power, which cancels the notes still waiting. Run Start again to replay.
+  - **Size:** the whole slab stays under Bedrock's 32,768-block `/fill` limit, so Start is always one command. A whole 4-minute song with 3 layers (≈1,800 blocks) is 8 layers of 16×16, 12 blocks tall.
+
+## Auto-builder (Realms-safe)
+
+Realms can't load your own files, so the builder fills every command block **through the normal command block screen, like a player would**:
+
+1. In the page pick **Slab (auto-builder)**, set the corner block and footprint, and click **Download build plan**.
+2. Double-click **`Start-Auto-Builder.bat`**. It finds the newest `*.slabplan.json` in Downloads, or you can drag one onto the `.bat`. Pick a speed (use *slow* on a laggy Realm), and do a short **test run** (e.g. 10 blocks) first.
+3. In Minecraft: Creative, flying, operator, near the corner, with the area empty. Click into Minecraft and press **F8**.
+4. **One-time calibration:** the builder opens the first command block. Then:
+   - hover the **Command Input** box and press **F8**
+   - hover the **left panel** and press **F8**
+   - after it scrolls, hover the **right end of Delay in Ticks** and press **F8**
+
+   It saves this; recalibrate (`-Recalibrate`) if you change the window size or GUI scale. Running Minecraft in a window next to the builder window makes the prompts easy to read.
+5. Hands off. For every block it:
+   - types `/fill` for each new layer and `/tp @s x y+2 z 0 90` into chat, so it's straight above the block looking down
+   - right-clicks, and **checks pixels that the screen really opened** (it retries, and re-teleports if not)
+   - pastes the command, scrolls down, pastes Delay in Ticks
+   - presses Esc and checks the screen closed
+
+   **F9** pauses/resumes and **F12** stops. It also pauses by itself whenever Minecraft isn't the active window. Progress is saved after every block: run it again to **resume**, and the half-done block is re-placed fresh.
+6. When it's done it shows the Start/Stop commands, plus `/gamerule commandblockoutput false` and a `/tickingarea` so the song plays even when nobody is next to it.
+
+It uses only what ships with Windows (PowerShell 5.1+). It's about 3 seconds per block at normal speed.
 
 ## Tests
 
@@ -41,6 +71,9 @@ Bedrock syntax: `/playsound <sound> [player] [x y z] [volume] [pitch] [minimumVo
 - **Track swaps:** hand-picked tracks for each layer work, and a silent pick explains why.
 - **Switches:** every switch and drums/harmony mode.
 - **Output:** command format and pitch range, repeater ticks, chain delays, Copy next and the .txt export.
+- **Slab layout:** a unique position per note, delays equal to time × 20, the correct level pattern, one Start/Stop command, and the build plan download.
+
+`node tests/auto-builder.test.mjs` (needs PowerShell; set `PWSH` to its path) dry-runs the auto-builder on that plan, printing every key and click instead of sending them. It checks the clear, layer and teleport commands, the pasted commands and delays, the per-block sequence, test-run limits, resume, and the finish.
 
 MIDI parsing uses [@tonejs/midi](https://github.com/Tonejs/Midi) (MIT, bundled in `web/vendor/midi.js`).
 

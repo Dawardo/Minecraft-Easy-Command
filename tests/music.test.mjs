@@ -158,7 +158,36 @@ check(r.rows.flatMap(x => x.events).every(e => / @p ~ ~ ~ [\d.]+ [\d.]+$/.test(e
 r = await setNum('#transpose', 2);
 check(r.rows.length > 0, 'transpose updates live');
 
-// ---- 7. not a MIDI file ----
+// ---- 7. slab (auto-builder) mode ----
+r = await change(() => page.click('#ticks [data-v="1"]'));
+r = await change(() => page.click('#build [data-v=slab]'));
+check(await page.locator('#slabSettings').isVisible(), 'slab settings appear for the slab build style');
+await page.fill('#slabX', '100'); await page.fill('#slabY', '70'); await page.fill('#slabZ', '-20');
+await page.fill('#slabW', '4'); await page.fill('#slabD', '3');
+r = await setNum('#slabD', 3);
+r = await setNum('#start', 0); r = await setNum('#length', 25);
+const slab = await page.evaluate(() => MM.state.song.slab);
+const nBlocks = r.rows.reduce((a, x) => a + x.events.length, 0);
+check(slab.blocks.length === nBlocks && slab.layers === Math.ceil(nBlocks / 12), `every note gets its own block (${nBlocks} blocks, ${slab.layers} layers of 4×3)`);
+check(new Set(slab.blocks.map(b => `${b.x},${b.y},${b.z}`)).size === nBlocks, 'no two blocks share a position');
+check(slab.blocks.every(b => b.x >= 100 && b.x <= 103 && b.z >= -20 && b.z <= -18), 'blocks stay inside the 4×3 footprint from the corner');
+const firstStep = r.rows[0].step;
+check(slab.blocks.every((b, i) => b.delay === Math.round((b.time - r.rows[0].time) * 20)), 'Delay in Ticks = time since the first note × 20');
+check(slab.blocks.every((b, i, a) => i === 0 || b.delay >= a[i - 1].delay), 'blocks are placed in time order');
+const kinds = slab.levels.map(l => l.kind[0]).join('');
+check(/^(cgc)*(cg)?$/.test(kinds.replace(/cgc/g, 'cgc')) && kinds.startsWith('cg'), `levels go command, glass, command, command, glass… (${kinds})`);
+const cmdYs = new Set(slab.levels.filter(l => l.kind === 'command').map(l => l.y)), glassYs = slab.levels.filter(l => l.kind === 'glass').map(l => l.y);
+check([...cmdYs].every(y => glassYs.includes(y - 1) || glassYs.includes(y + 1)), 'every command layer touches a glass (power) layer');
+check(slab.start === `/fill ${slab.box} redstone_block replace glass` && slab.stop === `/fill ${slab.box} glass replace redstone_block`, 'one Start / Stop command covers the whole slab');
+check(slab.problems.length === 0 && slab.volume <= 32768, 'fits in one /fill');
+const [planDl] = await Promise.all([page.waitForEvent('download'), page.click('#dlPlan')]);
+const planPath = path.join(out, planDl.suggestedFilename()); await planDl.saveAs(planPath);
+const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+check(plan.format === 'bedrock-music-maker/slab-plan' && plan.blocks.length === nBlocks && plan.blocks[0].command.startsWith('/playsound') && plan.levels.length === slab.levels.length, `build plan download (${path.basename(planPath)})`);
+await page.click('#qCopy');
+check((await page.locator('#quick').textContent()).includes('Delay in Ticks'), 'Copy next shows position and Delay in Ticks for hand building');
+
+// ---- 8. not a MIDI file ----
 const bogus = path.join(out, 'not-midi.mid'); fs.writeFileSync(bogus, 'hello');
 await page.setInputFiles('#file', bogus);
 await page.waitForFunction(() => /Could not read/.test(document.querySelector('#status').textContent));

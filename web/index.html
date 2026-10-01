@@ -75,7 +75,16 @@
       </div>
       <label>Build style</label>
       <div class="seg" id="build">
-        <button data-v="repeater" class="active">Repeaters</button><button data-v="chain">Chain blocks (no redstone)</button>
+        <button data-v="repeater" class="active">Repeaters</button><button data-v="chain">Chain blocks</button><button data-v="slab">Slab (auto-builder)</button>
+      </div>
+      <div id="slabSettings" class="slab-only">
+        <div class="hint">Every block is an Impulse block with its own Delay in Ticks, laid flat and stacked upward. One command powers them all at once. Pick a flat, empty spot.</div>
+        <label>Corner block (X Y Z): the first command block goes here</label>
+        <div class="xyz"><input type="number" id="slabX" value="0" step="1"><input type="number" id="slabY" value="64" step="1"><input type="number" id="slabZ" value="0" step="1"></div>
+        <div class="grid2">
+          <div><label>Width (along X)</label><input type="number" id="slabW" value="16" min="1" max="64" step="1"></div>
+          <div><label>Depth (along Z)</label><input type="number" id="slabD" value="16" min="1" max="64" step="1"></div>
+        </div>
       </div>
       <div class="hint live-note">Changes apply instantly.</div>
       <div class="hint" id="status"></div>
