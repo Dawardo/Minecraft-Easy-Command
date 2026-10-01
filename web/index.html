@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bedrock Music Maker</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="music.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">&#9835;</span>
+    <div>
+      <div class="title">Bedrock Music Maker</div>
+      <div class="subtitle">MIDI &rarr; <b>Bedrock</b> command block <span class="code">/playsound</span> commands</div>
+    </div>
+  </div>
+  <div class="actions"><a class="navlink" href="dialogue.html">Dialogue maker (paused) &rarr;</a></div>
+</header>
+
+<div class="m-layout">
+  <aside class="m-settings">
+    <div class="card">
+      <h3>1. Song</h3>
+      <label class="drop" id="drop">
+        <input type="file" id="file" accept=".mid,.midi" hidden>
+        <span id="dropText">Drop a MIDI file (.mid) here or <u>click to choose</u></span>
+      </label>
+      <div class="grid2">
+        <div><label>Start at (seconds)</label><input type="number" id="start" value="0" min="0" step="0.5"></div>
+        <div><label>Length (seconds)</label><input type="number" id="length" value="20" min="1" step="1"></div>
+      </div>
+      <div class="hint" id="songInfo">Every note becomes a command block, so start with 10–30 seconds.</div>
+    </div>
+
+    <div class="card">
+      <h3>2. Sound</h3>
+      <label>Speed grid (repeater ticks per step)</label>
+      <div class="seg" id="ticks">
+        <button data-v="1" class="active">1 tick (0.1 s)</button><button data-v="2">2 ticks (0.2 s)</button>
+      </div>
+
+      <div class="layer" id="layer1">
+        <div class="layer-head"><b>1. Melody</b><span class="onoff">ON</span></div>
+        <label>Instrument</label><select id="inst1"></select>
+        <label>Notes from</label><select id="src1"><option value="auto">Auto</option></select>
+      </div>
+      <div class="layer" id="layer2">
+        <div class="layer-head"><label class="switch"><input type="checkbox" id="on2" checked> <b>2. Bass</b></label><span class="onoff" id="state2">ON</span></div>
+        <label>Instrument</label><select id="inst2"></select>
+        <label>Notes from</label><select id="src2"><option value="auto">Auto</option></select>
+      </div>
+      <div class="layer" id="layer3">
+        <div class="layer-head"><label class="switch"><input type="checkbox" id="on3" checked> <b>3. Drums / harmony</b></label><span class="onoff" id="state3">ON</span></div>
+        <label>Plays</label>
+        <select id="mode3">
+          <option value="auto" selected>Auto: drums where the song has drums, harmony where it doesn't</option>
+          <option value="drums">Drums only</option>
+          <option value="harmony">Harmony only</option>
+        </select>
+        <label>Harmony instrument</label><select id="inst3" class="harm"></select>
+        <label>Harmony notes from</label><select id="src3" class="harm"><option value="auto">Auto</option></select>
+        <div class="hint" id="drumInfo">Drums use note.bd (kick), note.snare and note.hat.</div>
+      </div>
+
+      <div class="grid2">
+        <div><label>Transpose (semitones)</label><input type="number" id="transpose" value="0" min="-12" max="12" step="1"></div>
+        <div><label>Who hears it</label>
+          <select id="target">
+            <option value="all">Everyone (@a)</option>
+            <option value="near">Near the blocks (@a)</option>
+            <option value="p">Nearest player (@p)</option>
+          </select></div>
+      </div>
+      <label>Build style</label>
+      <div class="seg" id="build">
+        <button data-v="repeater" class="active">Repeaters</button><button data-v="chain">Chain blocks</button><button data-v="slab">Slab (auto-builder)</button>
+      </div>
+      <div id="slabSettings" class="slab-only">
+        <div class="hint">Every block is an Impulse block with its own Delay in Ticks, laid flat and stacked upward. One command powers them all at once. Pick a flat, empty spot.</div>
+        <label>Corner block (X Y Z): the first command block goes here</label>
+        <div class="xyz"><input type="number" id="slabX" value="0" step="1"><input type="number" id="slabY" value="64" step="1"><input type="number" id="slabZ" value="0" step="1"></div>
+        <div class="grid2">
+          <div><label>Width (along X)</label><input type="number" id="slabW" value="16" min="1" max="64" step="1"></div>
+          <div><label>Depth (along Z)</label><input type="number" id="slabD" value="16" min="1" max="64" step="1"></div>
+        </div>
+      </div>
+      <div class="hint live-note">Changes apply instantly.</div>
+      <div class="hint" id="status"></div>
+    </div>
+  </aside>
+
+  <main class="m-main" id="result">
+    <div class="card empty">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>Drop in a MIDI file (search "song name midi"). The commands appear straight away: melody, bass and drums/harmony are all picked automatically.</li>
+        <li>Optional: change the part of the song, the instruments, or which track a layer uses. Everything updates instantly.</li>
+        <li>Click <b>&#9654; Minecraft preview</b> to hear what the note blocks will sound like.</li>
+        <li>Build it with <b>Copy next</b>: each click copies the next command and tells you the repeater delay to set.</li>
+      </ol>
+      <p class="hint">Everything runs on your PC. Nothing is uploaded anywhere.</p>
+    </div>
+  </main>
+</div>
+<div class="toast hidden" id="toast"></div>
+<script src="vendor/midi.js"></script>
+<script src="music.js"></script>
+</body>
+</html>
