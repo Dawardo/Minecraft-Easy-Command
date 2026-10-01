@@ -51,7 +51,25 @@ namespace Bdm {
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    // Work in real screen pixels on every monitor, whatever the Windows display scaling (125%, 150%...).
+    // Otherwise a recorded click and the replayed click can be scaled differently and land off to the side.
+    public static void UseRealPixels() {
+      try { if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return; } catch (EntryPointNotFoundException) { }   // per-monitor v2 (Windows 10 1703+)
+      SetProcessDPIAware();
+    }
+    // Moves the mouse to a screen point the way a real mouse does (absolute move through SendInput, so the
+    // game sees it), then also sets the cursor there.
+    public static void MoveAbs(int x, int y) {
+      int vx = GetSystemMetrics(76), vy = GetSystemMetrics(77), vw = GetSystemMetrics(78), vh = GetSystemMetrics(79);
+      INPUT i = new INPUT(); i.type = INPUT_MOUSE;
+      i.U.mi.dx = (int)(((long)(x - vx) * 65535) / Math.Max(1, vw - 1));
+      i.U.mi.dy = (int)(((long)(y - vy) * 65535) / Math.Max(1, vh - 1));
+      i.U.mi.dwFlags = 0x0001 | 0x8000 | 0x4000;   // move | absolute | whole virtual desktop
+      Send(i);
+      SetCursorPos(x, y);
+    }
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
@@ -138,7 +156,7 @@ namespace Bdm {
   }
 }
 '@
-  [void][Bdm.Win]::SetProcessDPIAware()
+  [Bdm.Win]::UseRealPixels()
 }
 
 $VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
@@ -172,7 +190,16 @@ function TypeText([string]$text) {
     Start-Sleep -Milliseconds 15
   }
 }
-function MoveTo($p) { Act "move to $($p.x),$($p.y)"; if (-not $DryRun) { [void][Bdm.Win]::SetCursorPos($p.x, $p.y); Start-Sleep -Milliseconds 40 } }
+function MoveTo($p) {
+  Act "move to $($p.x),$($p.y)"
+  if ($DryRun) { return }
+  [Bdm.Win]::MoveAbs([int]$p.x, [int]$p.y); Start-Sleep -Milliseconds 60
+  $now = Cursor
+  if ([math]::Abs($now.x - $p.x) -gt 3 -or [math]::Abs($now.y - $p.y) -gt 3) {
+    Log "    mouse is at $($now.x),$($now.y) instead of $($p.x),$($p.y): moving again" 'Yellow'
+    [void][Bdm.Win]::SetCursorPos([int]$p.x, [int]$p.y); Start-Sleep -Milliseconds 60
+  }
+}
 function LeftClick($p) { MoveTo $p; Act 'left click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.LeftDown, 0); Start-Sleep -Milliseconds 40; [Bdm.Win]::Mouse($M.LeftUp, 0) } }
 function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 150; [Bdm.Win]::Mouse($M.RightUp, 0) } }
 function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::GetAsyncKeyState($vk) -band 0x8000) -ne 0 }
@@ -353,7 +380,7 @@ function Calibrate($firstBlock) {
     CloseBlock $scroll
     if ($ok) { break }
   }
-  @{ scroll = $scroll; command = $command; delay = $delay } | ConvertTo-Json -Depth 5 | Set-Content -Path $calFile -Encoding UTF8
+  @{ version = 2; scroll = $scroll; command = $command; delay = $delay } | ConvertTo-Json -Depth 5 | Set-Content -Path $calFile -Encoding UTF8
   Log 'Saved. Keep the same window size and GUI scale from now on (or say yes to "set up the clicks again" at the start).' 'Green'
   # the test typing went into the first block: put a fresh one back for the real build
   Chat ("/setblock {0} {1} {2} air" -f $firstBlock.x, $firstBlock.y, $firstBlock.z)
@@ -486,7 +513,7 @@ $firstLevel = $levels | Where-Object { $_.kind -eq 'command' } | Select-Object -
 $cal = $null
 if (-not $Recalibrate -and (Test-Path $calFile)) {
   $cal = Get-Content $calFile -Raw | ConvertFrom-Json
-  if (-not $cal.scroll) { $cal = $null }   # from the old setup: do the new one
+  if ($cal.version -ne 2) { $cal = $null }   # recorded before clicks used real screen pixels: record again
 }
 
 $startTime = Get-Date
