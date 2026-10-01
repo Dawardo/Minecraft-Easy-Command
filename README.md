@@ -50,7 +50,7 @@ Realms can't load your own files, so the builder fills every command block **thr
    - **a test run** (e.g. 10 blocks), with an optional **step-by-step** mode (F8 before every action)
 3. In Minecraft: Creative, flying, operator, near the corner, with the area empty. Click into Minecraft and press **F8**.
 4. **First time only:**
-   - **Typing test:** the builder opens chat and sends you a private `/tell` message using different methods. It tries pasting first (Ctrl+V, Shift+Insert, a direct paste message), then typing key by key, which pauses after the first character because Bedrock's command suggestions can swallow the next key. Answer **F8** when the whisper shows up complete and **F9** when it doesn't. It remembers the method that works (`-Retest` to redo it).
+   - **Typing:** chat commands are typed like a player would: press **/** (Minecraft opens chat with the `/` already in it), type the rest of the command key by key, press **Enter**. Command blocks get the command without the `/` (they don't need it).
    - **Calibration:** the builder opens the first command block. Hover over **Command Input** and press **F8**, then the **left panel** and **F8**. After it scrolls, hover over the **right end of Delay in Ticks** and press **F8**. Redo it with `-Recalibrate` if you change the window size or GUI scale.
 5. Hands off. For every block it:
    - types `/fill` for each new layer and `/tp @s x y+2 z 0 90` into chat, so it's straight above the block looking down

@@ -11,16 +11,14 @@
     5. presses Esc and checks the screen closed
 
   Keys while it runs:  F9 = pause / resume    F12 = stop (progress is saved, run again to resume)
-  First run: a short typing test finds a way of typing that your Minecraft accepts (you answer with F8 / F9).
+  Chat commands are typed like a player would: press / (opens chat with the /), type the rest, press Enter.
   Uses only what ships with Windows (PowerShell 5.1+). -DryRun prints every action instead of doing it.
 #>
 param(
   [Parameter(Position = 0)][string]$Plan,
   [ValidateSet('fast', 'normal', 'slow', 'veryslow')][string]$Speed = '',
-  [string]$ChatKey = 'T',
   [int]$Limit = -1,
   [switch]$Recalibrate,
-  [switch]$Retest,                 # redo the typing test
   [switch]$Step,                   # step-by-step: press F8 before every action (for finding problems)
   [switch]$DryRun,
   [switch]$Yes,                    # answer "yes" to every question (used by the dry-run test)
@@ -32,19 +30,26 @@ $calFile = Join-Path $here 'calibration.json'
 
 # ---------------------------------------------------------------- Windows input / screen helpers
 if (-not $DryRun) {
-  Add-Type -TypeDefinition @'
+  Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+  Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 namespace Bdm {
   public static class Win {
+    // MOUSEINPUT must be in the union: it makes INPUT 40 bytes on 64-bit. Without it SendInput rejects every event.
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
     [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
     [StructLayout(LayoutKind.Explicit)] public struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
     [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion U; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -60,24 +65,36 @@ namespace Bdm {
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
     const uint KEYUP = 0x0002, SCANCODE = 0x0008, EXTENDED = 0x0001;
 
-    static void Send(INPUT i) { SendInput(1, new INPUT[] { i }, Marshal.SizeOf(typeof(INPUT))); }
+    // SendInput returns how many events Windows took. A wrong INPUT size makes it take none and type
+    // NOTHING without any error, so check it instead of carrying on blind.
+    static void Send(INPUT[] inputs) {
+      uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+      if (sent != inputs.Length) throw new Exception("Windows didn't take the key or mouse press (SendInput error " + Marshal.GetLastWin32Error() + "). If Minecraft runs as administrator, run the builder as administrator too.");
+    }
+    static void Send(INPUT i) { Send(new INPUT[] { i }); }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern short VkKeyScanW(char c);
     const uint UNICODE = 0x0004;
 
     // useScan = scan code only (what games read for movement keys); otherwise virtual key + scan code (like a real keyboard driver)
-    public static void Key(int vk, bool up, bool useScan) {
+    static INPUT KeyInput(int vk, bool up, bool useScan) {
       INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
       i.U.ki.wScan = (ushort)MapVirtualKey((uint)vk, 0);
-      // Insert, Delete, Home, End, Page Up/Down and the arrows are "extended" keys
-      uint ext = ((vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E) ? EXTENDED : 0;
+      // Insert, Delete, Home, End, Page Up/Down, the arrows and right Ctrl are "extended" keys
+      uint ext = ((vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E || vk == 0xA3) ? EXTENDED : 0;
       if (useScan) { i.U.ki.dwFlags = SCANCODE | ext | (up ? KEYUP : 0); }
       else { i.U.ki.wVk = (ushort)vk; i.U.ki.dwFlags = ext | (up ? KEYUP : 0); }
-      Send(i);
+      return i;
     }
-    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-    // asks the focused window to paste, without pressing any keys
-    public static void PostPaste() { PostMessage(GetForegroundWindow(), 0x0302, IntPtr.Zero, IntPtr.Zero); }
+    public static void Key(int vk, bool up, bool useScan) { Send(KeyInput(vk, up, useScan)); }
+    // Modifier + key in ONE SendInput call: nothing can get in between, and the modifier can't stay held down
+    public static void Chord(int mod, int vk, bool useScan) {
+      Send(new INPUT[] { KeyInput(mod, false, useScan), KeyInput(vk, false, useScan), KeyInput(vk, true, useScan), KeyInput(mod, true, useScan) });
+    }
+    // Lets go of both Shifts and both Ctrls, so a stop or crash never leaves one stuck down
+    public static void ReleaseModifiers() {
+      Send(new INPUT[] { KeyInput(0xA0, true, false), KeyInput(0xA1, true, false), KeyInput(0xA2, true, false), KeyInput(0xA3, true, false) });
+    }
     public static void Unicode(char c, bool up) {
       INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
       i.U.ki.wScan = c; i.U.ki.dwFlags = UNICODE | (up ? KEYUP : 0);
@@ -111,13 +128,55 @@ namespace Bdm {
       GetWindowText(GetForegroundWindow(), sb, 256);
       return sb.ToString();
     }
+    // x, y, width, height of the inside of the window in front (no title bar), in screen pixels
+    public static int[] ClientArea() {
+      IntPtr h = GetForegroundWindow(); RECT r; POINT p = new POINT();
+      GetClientRect(h, out r); ClientToScreen(h, ref p);
+      return new int[] { p.X, p.Y, r.Right - r.Left, r.Bottom - r.Top };
+    }
+    // A box of the screen as 0xRRGGBB values: one screen copy, much faster than GetPixel per pixel
+    public static int[] Shot(int x, int y, int w, int h) {
+      using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
+        using (Graphics g = Graphics.FromImage(bmp)) { g.CopyFromScreen(x, y, 0, 0, new Size(w, h)); }
+        BitmapData d = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        int[] px = new int[w * h];
+        Marshal.Copy(d.Scan0, px, 0, px.Length);
+        bmp.UnlockBits(d);
+        return px;
+      }
+    }
+    // Pixels in Minecraft's error red (chat color code c, about #FF5555). Tight, so orange command blocks,
+    // brown and pink don't count: strong red, with green and blue lower and about equal.
+    public static int RedCount(int[] px) {
+      int n = 0;
+      foreach (int c in px) {
+        int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+        if (r >= 200 && g >= 40 && g <= 130 && b >= 40 && b <= 130 && r - g > 90 && r - b > 90 && Math.Abs(g - b) < 40) n++;
+      }
+      return n;
+    }
+    // How many pixels clearly differ between two shots of the same box
+    public static int Changed(int[] a, int[] b) {
+      int n = 0;
+      for (int i = 0; i < a.Length && i < b.Length; i++) {
+        int x = a[i], y = b[i];
+        int d = Math.Abs(((x >> 16) & 0xFF) - ((y >> 16) & 0xFF)) + Math.Abs(((x >> 8) & 0xFF) - ((y >> 8) & 0xFF)) + Math.Abs((x & 0xFF) - (y & 0xFF));
+        if (d > 60) n++;
+      }
+      return n;
+    }
+    // Every pixel the same: the screen couldn't be read (black capture), so a check can't tell anything
+    public static bool Blank(int[] px) {
+      for (int i = 1; i < px.Length; i++) { if (px[i] != px[0]) return false; }
+      return true;
+    }
   }
 }
 '@
   [void][Bdm.Win]::SetProcessDPIAware()
 }
 
-$VK = @{ Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
+$VK = @{ Slash = 0xBF; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010; Wheel = 0x0800 }
 
 $script:speedMul = 1.0
@@ -125,49 +184,28 @@ function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ([int]($
 function Log([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Act([string]$msg) { if ($DryRun) { Write-Host "  [dry] $msg" -ForegroundColor DarkGray } }
 
-# How keys and text are sent. Chosen by the typing test and saved with the calibration.
-#   keys: 'vk' (virtual key + scan code) or 'scan' (scan code only)
-#   text: 'type' (press each key), 'unicode' (send characters), 'paste' (clipboard + Ctrl+V)
-$script:input = @{ keys = 'vk'; text = 'type' }
-function UseScan { return ($script:input.keys -eq 'scan') }
-function Tap([int]$vk) { Act "key $vk"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, (UseScan)); Start-Sleep -Milliseconds 30 } }
+# Keys are sent as virtual key + scan code, like a real keyboard driver.
+function Tap([int]$vk) { Act "key $vk"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false, $false); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, $false); Start-Sleep -Milliseconds 30 } }
 function TapScan([int]$vk) { Act "key $vk (scan)"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false, $true); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, $true); Start-Sleep -Milliseconds 30 } }
 function Combo([int]$vk) {
   Act "ctrl+$vk"
   if (-not $DryRun) {
-    [Bdm.Win]::Key($VK.Ctrl, $false, (UseScan)); Start-Sleep -Milliseconds 30
-    [Bdm.Win]::Key($vk, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, (UseScan)); Start-Sleep -Milliseconds 30
-    [Bdm.Win]::Key($VK.Ctrl, $true, (UseScan)); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($VK.Ctrl, $false, $false); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($vk, $false, $false); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, $false); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($VK.Ctrl, $true, $false); Start-Sleep -Milliseconds 30
   }
 }
-function Clip([string]$text) { Act "clipboard = $text"; if (-not $DryRun) { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 60 } }
-# Puts text into whatever text box has focus, using the chosen method.
-function ShiftInsert {
-  [Bdm.Win]::Key($VK.Shift, $false, (UseScan)); Start-Sleep -Milliseconds 30
-  [Bdm.Win]::Key($VK.Insert, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($VK.Insert, $true, (UseScan)); Start-Sleep -Milliseconds 30
-  [Bdm.Win]::Key($VK.Shift, $true, (UseScan)); Start-Sleep -Milliseconds 30
-}
+# Types text into whatever text box has focus, one key at a time (Shift when needed).
 function TypeText([string]$text) {
-  Act "type ($($script:input.text)): $text"
+  Act "type: $text"
   if ($DryRun) { return }
-  switch ($script:input.text) {
-    'paste' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; Combo $VK.V }
-    'paste-ins' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; ShiftInsert }
-    'paste-msg' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; [Bdm.Win]::PostPaste() }
-    default {
-      # typing: after the first character Bedrock may pop up command suggestions and swallow the next key,
-      # so pause after it, then type steadily
-      $first = $true
-      foreach ($c in $text.ToCharArray()) {
-        if ($script:input.text -eq 'unicode' -or -not [Bdm.Win]::TypeChar($c, (UseScan), 12)) {
-          [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 12; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 12
-        }
-        if ($first) { Start-Sleep -Milliseconds 450; $first = $false } else { Start-Sleep -Milliseconds 15 }
-      }
+  foreach ($c in $text.ToCharArray()) {
+    if (-not [Bdm.Win]::TypeChar($c, $false, 12)) {   # a character this keyboard layout can't type: send it as a character
+      [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 12; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 12
     }
+    Start-Sleep -Milliseconds 15
   }
 }
-function Paste([string]$text) { TypeText $text }
 function MoveTo($p) { Act "move to $($p.x),$($p.y)"; if (-not $DryRun) { [void][Bdm.Win]::SetCursorPos($p.x, $p.y); Start-Sleep -Milliseconds 40 } }
 function LeftClick($p) { MoveTo $p; Act 'left click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.LeftDown, 0); Start-Sleep -Milliseconds 40; [Bdm.Win]::Mouse($M.LeftUp, 0) } }
 function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 50; [Bdm.Win]::Mouse($M.RightUp, 0) } }
@@ -176,11 +214,16 @@ function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::
 function Cursor { $p = New-Object Bdm.Win+POINT; [void][Bdm.Win]::GetCursorPos([ref]$p); return @{ x = $p.X; y = $p.Y } }
 function Beep([int]$f = 880) { if (-not $DryRun) { try { [Console]::Beep($f, 120) } catch {} } }
 
+# Waits for F8 (continue) or F12 (stop)
+function WaitF8 {
+  if ($DryRun) { return }
+  while (-not (Pressed $VK.F8)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 30 }
+  while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }
+}
 function StepPause([string]$what) {
   if (-not $Step -or $DryRun) { return }
   Log "  NEXT: $what   (F8 = do it, F12 = stop)" 'Magenta'
-  while (-not (Pressed $VK.F8)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 30 }
-  while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }
+  WaitF8
 }
 function WaitForKey([int]$vk) {
   if ($DryRun) { return }
@@ -222,55 +265,80 @@ function WaitClosed([int]$timeoutMs) {
   return (-not (IsOpen))
 }
 
+# ---------------------------------------------------------------- did the text arrive? (screen checks)
+# Red error text in chat (Minecraft's red, like "Unknown command" or "Syntax error"). Bedrock shows chat on
+# the left, so the left 60% of the window is read. Counted before and after a command, so old lines don't count.
+$script:redMin = 150   # new red pixels that mean a new error line
+function ChatRed {
+  if ($DryRun) { return 0 }
+  $a = [Bdm.Win]::ClientArea()
+  if ($a[2] -lt 10 -or $a[3] -lt 10) { return 0 }
+  return [Bdm.Win]::RedCount([Bdm.Win]::Shot($a[0], $a[1], [int]($a[2] * 0.6), $a[3]))
+}
+# Screen box around a calibrated point, kept inside the Minecraft window: @(x, y, w, h)
+function BoxAround($pt, [int]$rx, [int]$ry) {
+  $a = [Bdm.Win]::ClientArea()
+  $x0 = [int][math]::Max($a[0], $pt.x - $rx); $y0 = [int][math]::Max($a[1], $pt.y - $ry)
+  $x1 = [int][math]::Min($a[0] + $a[2], $pt.x + $rx); $y1 = [int][math]::Min($a[1] + $a[3], $pt.y + $ry)
+  return @($x0, $y0, ($x1 - $x0), ($y1 - $y0))
+}
+function ShotBox($box) {
+  if ($box[2] -le 0 -or $box[3] -le 0) { return $null }
+  return , [Bdm.Win]::Shot($box[0], $box[1], $box[2], $box[3])
+}
+
 # ---------------------------------------------------------------- game actions
 $T = @{ chatOpen = 700; afterPaste = 250; afterEnter = 600; tp = 500; openTimeout = 4000; settle = 300; click = 200; scroll = 350; closeTimeout = 3000 }
 
-function Chat([string]$command) {
+# Sends a chat command. If Minecraft answers with a red error (letters went missing on the way), it's sent again.
+# -MayFail: a red answer is fine (clearing air that's already air), so don't check.
+function Chat([string]$command, [switch]$MayFail) {
   Log "    chat: $command" 'DarkCyan'
-  StepPause "open chat and type: $command"
-  TapScan ([int][char]$ChatKey.ToUpper()); Wait $T.chatOpen      # the chat key works as a scan code (confirmed)
-  TypeText $command; Wait $T.afterPaste
-  StepPause 'press Enter'
-  Tap $VK.Enter; Wait $T.afterEnter
+  for ($try = 1; $try -le 3; $try++) {
+    $red = ChatRed
+    # Press "/" (opens chat with the "/" already typed), type the rest, Enter. Opening chat with T made
+    # the T land in the chat too ("t/tell").
+    StepPause "press / and type: $command"
+    TapScan $VK.Slash; Wait $T.chatOpen
+    TypeText ($command -replace '^/', ''); Wait $T.afterPaste
+    StepPause 'press Enter'
+    Tap $VK.Enter; Wait $T.afterEnter
+    if ($MayFail -or ((ChatRed) - $red) -lt $script:redMin) { return }
+    Log "    Minecraft answered with a red error (try $try of 3): sending it again" 'Yellow'
+    Wait 1000
+  }
+  Log "  Minecraft keeps answering this with a red error:  $command" 'Red'
+  Log '  Read the chat. If letters are missing, open chat and type it yourself. If it only says nothing needed changing, that''s fine.' 'Red'
+  Log '  Then press F8 to continue, or F12 to stop.' 'Red'
+  Beep 300; Beep 300
+  WaitF8
 }
 
-# ---------------------------------------------------------------- typing test
-# Tries each way of typing in chat; you say (F8 / F9) whether the message showed up.
-function TypingTest {
-  $methods = @(
-    @{ keys = 'vk'; text = 'paste'; name = 'pasting with Ctrl+V' },
-    @{ keys = 'vk'; text = 'paste-ins'; name = 'pasting with Shift+Insert' },
-    @{ keys = 'vk'; text = 'paste-msg'; name = 'pasting without keys (paste message)' },
-    @{ keys = 'vk'; text = 'type'; name = 'typing key by key' },
-    @{ keys = 'vk'; text = 'unicode'; name = 'typing characters (unicode)' },
-    @{ keys = 'scan'; text = 'type'; name = 'typing key by key (scan codes)' }
-  )
-  Log ''
-  Log '=== Typing test (one time) ===' 'Cyan'
-  Log 'The builder will open chat and send a private message to you. Watch the Minecraft chat.'
-  $n = 0
-  foreach ($m in $methods) {
-    $n++
-    $script:input = @{ keys = $m.keys; text = $m.text }
-    EnsureMinecraft
-    Log "Test $n of $($methods.Count): $($m.name)..." 'White'
-    TapScan ([int][char]$ChatKey.ToUpper()); Start-Sleep -Milliseconds 900
-    TypeText "/tell @s Music builder test $n"; Start-Sleep -Milliseconds 400
-    Tap $VK.Enter; Start-Sleep -Milliseconds 1200
-    Log "   Did the whisper 'Music builder test $n' show up (with nothing missing, and no 'unknown command' error)?  F8 = YES    F9 = NO" 'Yellow'
-    Beep
-    while ($true) {
-      if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; Log "   Using: $($m.name)" 'Green'; return $script:input }
-      if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; break }
-      if (Pressed $VK.F12) { throw 'STOP' }
-      Start-Sleep -Milliseconds 30
-    }
-    # close chat if it stayed open, clear what was typed
-    TapScan $VK.Esc; Start-Sleep -Milliseconds 300
-    if ([Bdm.Win]::ForegroundTitle() -notmatch 'Minecraft') { EnsureMinecraft }
+# Clicks a text box, empties it, types the text, and checks on screen that the text showed up in the box.
+# $minChanged: how many pixels must change (a whole command changes thousands, a single digit a few dozen).
+$script:checkBoxes = $true
+function TypeInto($pt, [string]$text, [int]$backs, [int]$minChanged) {
+  for ($try = 1; $try -le 2; $try++) {
+    LeftClick $pt; Wait $T.click
+    Combo $VK.A; for ($i = 0; $i -lt $backs; $i++) { Tap $VK.Back }
+    $box = $null; $before = $null
+    if ($script:checkBoxes -and -not $DryRun) { Start-Sleep -Milliseconds 100; $box = BoxAround $pt 400 60; $before = ShotBox $box }
+    TypeText $text; Wait $T.afterPaste
+    if ($null -eq $before -or [Bdm.Win]::Blank($before)) { return }      # not checking, or the screen can't be read
+    if ([Bdm.Win]::Changed($before, (ShotBox $box)) -ge $minChanged) { return }
+    Log "    the text didn't show up in the box (try $try of 2)" 'Yellow'
   }
-  throw 'None of the typing methods worked. Tell the developer what you saw in chat for each test.'
+  Log "  The text still doesn't show up in the box. If it's missing, click the box and type it yourself:  $text" 'Red'
+  Log '  F8 = it''s there now, continue    F9 = it was there all along (stop checking boxes)    F12 = stop' 'Red'
+  Beep 300; Beep 300
+  while ($true) {
+    if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; return }
+    if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; $script:checkBoxes = $false; Log '  OK, not checking the boxes any more.' 'Yellow'; return }
+    if (Pressed $VK.F12) { throw 'STOP' }
+    Start-Sleep -Milliseconds 30
+  }
 }
+
 function Fmt([double]$v) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
 function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))); Wait $T.tp }
 
@@ -287,17 +355,14 @@ function OpenBlock($b) {
 }
 
 function FillBlock($b) {
-  # Command Input (a fresh block is empty; Ctrl+A + Backspace makes sure)
+  # Command Input (a fresh block is empty; Ctrl+A + Backspace makes sure). Command blocks don't need the
+  # leading '/', and leaving it out means no command suggestions popping up to swallow a key.
   StepPause 'click Command Input and type the command'
-  LeftClick $cal.command; Wait $T.click
-  Combo $VK.A; Tap $VK.Back
-  Paste $b.command; Wait $T.afterPaste
+  TypeInto $cal.command ($b.command -replace '^/', '') 1 150
   # Delay in Ticks: scroll the left panel to the bottom, then replace the value
   StepPause 'scroll the left panel down and type Delay in Ticks'
   MoveTo $cal.panel; WheelDown 12; Wait $T.scroll
-  LeftClick $cal.delay; Wait $T.click
-  Combo $VK.A; for ($i = 0; $i -lt 7; $i++) { Tap $VK.Back }
-  Paste ([string]$b.delay); Wait $T.afterPaste
+  TypeInto $cal.delay ([string]$b.delay) 7 20
   # close = save
   StepPause 'press Esc to close (and save) the command block'
   if ($DryRun) { $script:dryOpen = $false }
@@ -476,29 +541,15 @@ Log ''
 Log 'Before you start, in Minecraft:' 'White'
 Log '  - Creative mode, cheats on, you are an operator (on Realms: the owner or an operator)'
 Log '  - FLYING (double-tap jump), standing near the corner, nothing in the way'
-Log '  - Chat key is T (start with -ChatKey to change it)'
+Log '  - the / key opens chat (Minecraft''s default)'
 Log 'Then click into Minecraft and press F8. The builder takes over the keyboard and mouse: don''t touch them.' 'Yellow'
 Beep; WaitForKey $VK.F8
 EnsureMinecraft
-
-# how to type into Minecraft (found once by the typing test, then remembered)
-$inputFile = Join-Path $here 'input.json'
-if ($DryRun) { $script:input = @{ keys = 'vk'; text = 'type' } }
-else {
-  $saved = $null
-  if (-not $Retest -and (Test-Path $inputFile)) { $saved = Get-Content $inputFile -Raw | ConvertFrom-Json }
-  if ($saved -and $saved.version -eq 2) {
-    $script:input = @{ keys = $saved.keys; text = $saved.text }
-    Log "Typing method: $($saved.text) / $($saved.keys) (run with -Retest to test again)"
-  } else {
-    $script:input = TypingTest
-    @{ keys = $script:input.keys; text = $script:input.text; version = 2 } | ConvertTo-Json | Set-Content -Path $inputFile -Encoding UTF8
-  }
-}
+if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run was killed with Shift or Ctrl held
 
 $fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)
 if ($fresh -and $p.clear -and (Ask 'Clear the build space first (fills the box with air)? Only say yes if nothing there matters.' $false)) {
-  foreach ($c in @($p.clear)) { Chat $c }
+  foreach ($c in @($p.clear)) { Chat $c -MayFail }
 }
 
 # levels must exist before calibration can open the first block
@@ -531,15 +582,14 @@ try {
       CheckKeys; EnsureMinecraft
       if ($justResumed) {
         # after a stop the block might be half filled in: replace it with a fresh one
-        Chat ("/setblock {0} {1} {2} air" -f $b.x, $b.y, $b.z); Chat ("/setblock {0} {1} {2} command_block" -f $b.x, $b.y, $b.z)
+        Chat ("/setblock {0} {1} {2} air" -f $b.x, $b.y, $b.z) -MayFail; Chat ("/setblock {0} {1} {2} command_block" -f $b.x, $b.y, $b.z)
         $justResumed = $false
       }
       TpAbove $b
       if (-not (OpenBlock $b)) {
         Log "  Block $($i + 1) at $($b.x) $($b.y) $($b.z) won't open. Fix it by hand if needed (right-click it), close it, then press F8 to continue or F12 to stop." 'Red'
         Beep 300; Beep 300
-        while (-not (Pressed $VK.F8)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 50 }
-        while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }
+        WaitF8
         if (-not (OpenBlock $b)) { throw "Block $($i + 1) still won't open." }
       }
       FillBlock $b
@@ -569,4 +619,6 @@ try {
 } catch {
   if ($_.Exception.Message -eq 'STOP') { Log "Stopped. Progress saved at block $($prog.next + 1). Run the builder again to resume." 'Yellow' }
   else { Log "Error: $($_.Exception.Message)" 'Red'; Log "Progress saved at block $($prog.next + 1)." 'Yellow'; exit 1 }
+} finally {
+  if (-not $DryRun) { try { [Bdm.Win]::ReleaseModifiers() } catch {} }   # never leave Shift or Ctrl held down
 }
