@@ -219,6 +219,23 @@ const afterEnd = await page.evaluate(() => [+document.querySelector('#start').va
 check(afterEnd[0] === snipped[0] && Math.abs(afterEnd[1] - dur * 0.2) < 0.3, `dragging the end edge only changes the end (${afterEnd[1]} s)`);
 check((await page.locator('#snipInfo').textContent()).includes(afterEnd[1].toFixed(1) + ' s'), 'shows start, end and length under the timeline');
 
+// ---- 7c. position slider: shows how far along it is, drag to rewind ----
+check(await page.locator('#seek').isVisible() && /^0:00\.0 \/ 0:0\d\.\d$/.test(await page.locator('#seekTime').textContent()), 'position slider shows 0:00.0 / part length');
+await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = 1; s.dispatchEvent(new Event('input')); s.dispatchEvent(new Event('change')); });
+check((await page.locator('#seekTime').textContent()).startsWith('0:01.0'), 'dragging the slider moves the position (0:01.0)');
+await page.click('#snipPlay'); await page.waitForTimeout(700);
+const playing = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(playing[1] === 'original' && playing[0] > 1.2 && playing[0] < 2.5, `Play part starts from the slider and the slider moves along (${playing[0].toFixed(2)} s)`);
+await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = 0.2; s.dispatchEvent(new Event('input')); });
+const midDrag = await page.evaluate(() => MM.player.kind);
+await page.evaluate(() => document.querySelector('#seek').dispatchEvent(new Event('change')));
+await page.waitForTimeout(300);
+const rewound = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(midDrag === null && rewound[1] === 'original' && rewound[0] < 0.9, `rewinding while playing: pauses while dragging, plays on from there (${rewound[0].toFixed(2)} s)`);
+await page.click('#snipStop');
+const stopped = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(stopped[1] === null && stopped[0] > 0, 'Stop keeps the position, so Play goes on from there');
+
 // ---- 8. not a MIDI file ----
 const bogus = path.join(out, 'not-midi.mid'); fs.writeFileSync(bogus, 'hello');
 await page.setInputFiles('#file', bogus);

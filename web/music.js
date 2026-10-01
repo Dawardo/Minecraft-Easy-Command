@@ -205,14 +205,14 @@ function buildSteps(song) {
 }
 
 // ---------- snip editor: choose the part of the song on a timeline ----------
-const snip = { drag: null, raf: 0 };
+const snip = { drag: null };
 const SNAP = 0.1;
 function snipRange() {
   const s = Math.max(0, +$('#start').value || 0);
   return [s, s + Math.max(1, +$('#length').value || 20)];
 }
 /** Draws the whole song (note density, tune in green), the chosen part, and the playhead. */
-function drawSnip(playhead = null) {
+function drawSnip() {
   const cv = $('#snip');
   if (!cv || !state.midi) return;
   const dur = Math.max(1, state.midi.midi.duration);
@@ -247,7 +247,7 @@ function drawSnip(playhead = null) {
   g.globalAlpha = 1; g.fillStyle = col('--accent');
   g.fillRect(x0 - 1, 0, 3, h - 14); g.fillRect(x1 - 2, 0, 3, h - 14);
   g.fillRect(x0 - 4, 0, 9, 6); g.fillRect(x1 - 5, 0, 9, 6);
-  if (playhead !== null) { g.fillStyle = col('--text'); g.fillRect((playhead / dur) * w, 0, 2, h - 14); }
+  if (player.pos !== null) { g.fillStyle = col('--text'); g.fillRect(((s + player.pos) / dur) * w, 0, 2, h - 14); }
   $('#snipInfo').textContent = `${fmtTime(s)}.${Math.round((s % 1) * 10)} → ${fmtTime(e)}.${Math.round((e % 1) * 10)} · ${(e - s).toFixed(1)} s`;
 }
 /** Writes start/length into the inputs (snapped, kept inside the song and 1..MAX_SECONDS long). */
@@ -286,18 +286,18 @@ function initSnip() {
   };
   cv.addEventListener('pointerup', done);
   cv.addEventListener('pointercancel', done);
-  $('#snipPlay').onclick = () => {
-    if (!state.settings) return;
-    playOriginal();
-    const t0 = ctx().currentTime + 0.1, { start, length } = state.settings;
-    const tick = () => {
-      const p = ctx().currentTime - t0;
-      if (p > length) { snip.raf = 0; drawSnip(); return; }
-      drawSnip(start + Math.max(0, p)); snip.raf = requestAnimationFrame(tick);
-    };
-    snip.raf = requestAnimationFrame(tick);
-  };
+  $('#snipPlay').onclick = () => play('original');
   $('#snipStop').onclick = stopAll;
+  // position slider: dragging it rewinds or skips; if something was playing it goes on from there on release
+  const seek = $('#seek');
+  seek.addEventListener('input', () => {
+    if (player.kind && !player.seeking) { player.seeking = player.kind; stopSound(); cancelAnimationFrame(player.raf); player.kind = null; }
+    player.pos = +seek.value; showPos();
+  });
+  seek.addEventListener('change', () => {
+    const resume = player.seeking; player.seeking = null;
+    if (resume) play(resume, +seek.value);
+  });
   $('#start').addEventListener('input', () => drawSnip());
   $('#length').addEventListener('input', () => drawSnip());
 }
@@ -305,9 +305,56 @@ function initSnip() {
 // ---------- preview synth ----------
 let actx = null, playing = [];
 function ctx() { return (actx ||= new (window.AudioContext || window.webkitAudioContext)()); }
+function stopSound() { playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = []; }
+/** Stop: the position stays where it is, so Play goes on from there (drag the slider back to rewind). */
 function stopAll() {
-  playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = [];
-  if (snip.raf) { cancelAnimationFrame(snip.raf); snip.raf = 0; drawSnip(); }
+  stopSound();
+  cancelAnimationFrame(player.raf); player.kind = null;
+  showPos();
+}
+
+// ---------- player: what's playing, how far along it is, and seeking ----------
+// pos = seconds into the chosen part (null = at the start, nothing played yet)
+const player = { kind: null, from: 0, t0: 0, raf: 0, pos: null, seeking: null };
+const fmtPos = t => `${fmtTime(t)}.${Math.floor((t % 1) * 10)}`;
+function showPos() {
+  const len = state.settings ? state.settings.length : 0, seek = $('#seek');
+  if (!seek) return;
+  seek.max = Math.max(0.1, len);
+  if (!player.seeking) seek.value = player.pos ?? 0;
+  $('#seekTime').textContent = `${fmtPos(player.pos ?? 0)} / ${fmtPos(len)}`;
+  drawSnip();
+}
+/** Plays the chosen part from `from` seconds in: 'original' = every MIDI track, 'preview' = the Minecraft notes. */
+function play(kind, from = player.pos ?? 0) {
+  if (!state.settings || (kind === 'preview' && !state.song)) return;
+  const len = state.settings.length;
+  if (from >= len - 0.05) from = 0;   // at the end: start again
+  stopSound(); cancelAnimationFrame(player.raf);
+  const ac = ctx(); ac.resume();
+  const master = ac.createGain(); master.connect(ac.destination);
+  const t0 = ac.currentTime + 0.1;
+  if (kind === 'original') {
+    master.gain.value = 0.5;
+    const s = state.settings;
+    for (const t of state.midi.tracks) for (const n of t.notes) {
+      const at = n.time - s.start;
+      if (at < from || at >= len) continue;
+      const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.4 };
+      synthNote(ac, master, e, t0 + at - from);
+    }
+  } else {
+    master.gain.value = 0.8;
+    for (const r of state.song.rows) if (r.time >= from) for (const e of r.events) synthNote(ac, master, e, t0 + r.time - from);
+  }
+  Object.assign(player, { kind, from, t0, pos: from });
+  const tick = () => {
+    const p = player.from + Math.max(0, ctx().currentTime - player.t0);
+    if (p >= len) { player.kind = null; player.pos = null; showPos(); return; }   // finished: back to the start
+    player.pos = p; showPos();
+    player.raf = requestAnimationFrame(tick);
+  };
+  player.raf = requestAnimationFrame(tick);
 }
 function noiseBuffer(ac) {
   if (noiseBuffer.b) return noiseBuffer.b;
@@ -344,27 +391,6 @@ function synthNote(ac, out, e, t) {
   if (kind === 'bass') { const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 700; o.connect(f); node = f; }
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0005, t + len);
   node.connect(g); o.start(t); o.stop(t + len + 0.05); playing.push(o);
-}
-function playPreview() {
-  if (!state.song) return;
-  stopAll();
-  const ac = ctx(); ac.resume();
-  const master = ac.createGain(); master.gain.value = 0.8; master.connect(ac.destination);
-  const t0 = ac.currentTime + 0.1;
-  for (const r of state.song.rows) for (const e of r.events) synthNote(ac, master, e, t0 + r.time);
-}
-/** Plays every track of the chosen part (what the MIDI really sounds like, roughly). */
-function playOriginal() {
-  if (!state.midi || !state.settings) return;
-  stopAll();
-  const ac = ctx(); ac.resume();
-  const master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
-  const t0 = ac.currentTime + 0.1, s = state.settings;
-  for (const t of state.midi.tracks) for (const n of t.notes) {
-    if (n.time < s.start || n.time >= s.start + s.length) continue;
-    const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.4 };
-    synthNote(ac, master, e, t0 + n.time - s.start);
-  }
 }
 
 // ---------- UI ----------
@@ -548,6 +574,10 @@ function convert() {
   state.steps = buildSteps(state.song);
   state.pos = 0;
   state.version++;
+  // a different part: the position goes back to its start
+  const part = `${s.start}:${s.length}`;
+  if (part !== player.part) { player.part = part; if (player.kind) stopAll(); player.pos = null; }
+  showPos();
   $('#status').textContent = `Updated (${state.steps.length} command blocks).`;
   renderResult();
 }
@@ -649,8 +679,8 @@ function renderResult() {
         }).join('')}</td></tr>`).join('')}
       </tbody></table></div>
     </div>`;
-  $('#pOrig').onclick = playOriginal;
-  $('#pPrev').onclick = playPreview;
+  $('#pOrig').onclick = () => play('original');
+  $('#pPrev').onclick = () => play('preview');
   $('#pStop').onclick = stopAll;
   $('#dlTxt').onclick = downloadTxt;
   if ($('#dlPlan')) $('#dlPlan').onclick = downloadPlan;
@@ -835,5 +865,5 @@ function init() {
 }
 
 // exposed for automated tests
-window.MM = { state, setSnip, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
+window.MM = { state, player, setSnip, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
 init();
