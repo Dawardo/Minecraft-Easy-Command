@@ -9,6 +9,9 @@ const planPath = path.join(root, 'tests/out/band_song.slabplan.json');
 const pwsh = process.env.PWSH || 'pwsh';
 const script = path.join(root, 'tools/auto-builder.ps1');
 let failures = 0;
+const chatsOf = out => [...out.matchAll(/chat: (.*)/g)].map(m => m[1]);
+// teleports to blocks (the teleport right before a /fill only goes to the layer)
+const blockTps = cs => cs.filter((c, i) => c.startsWith('/tp @s') && !(cs[i + 1] || '').startsWith('/fill'));
 const check = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'}  ${msg}`); if (!cond) failures++; };
 
 const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
@@ -26,9 +29,10 @@ check(parse === 'OK', 'auto-builder.ps1 parses: ' + parse);
 
 // test run: first 5 blocks
 let out = run('-Limit', '5');
-const chats = [...out.matchAll(/chat: (.*)/g)].map(m => m[1]);
-check(chats[0].endsWith(' air') && chats[1] === plan.levels[0].fill, 'clears the space, then places the first command layer');
-const tps = chats.filter(c => c.startsWith('/tp @s'));
+const chats = chatsOf(out);
+check(chats[0].endsWith(' air') && chats[1].startsWith('/tp @s') && chats[2] === plan.levels[0].fill, 'clears the space, then teleports to the first command layer and places it');
+check(chats.every((c, i) => !c.startsWith('/fill') || c.endsWith(' air') || chats[i - 1].startsWith('/tp @s')) && /chat: \/tp @s[^\n]*\n(?:.*\n)*?.*chat: \/fill/.test(out), 'every layer /fill comes right after a teleport');
+const tps = blockTps(chats);
 check(tps.length === 5 && tps.every((c, i) => c === `/tp @s ${plan.blocks[i].x + 0.5} ${plan.blocks[i].y + 2} ${plan.blocks[i].z + 0.5} 0 90`), 'teleports above each block, looking straight down');
 const clips = [...out.matchAll(/type: (.*)/g)].map(m => m[1]);
 check(plan.blocks.slice(0, 5).every(b => clips.includes(b.command.slice(1)) && clips.includes(String(b.delay))), 'pastes each command and its Delay in Ticks');
@@ -42,7 +46,7 @@ check(/Resume where it stopped \(block 6/.test(out) && out.includes(`chat: /setb
 
 // finish the rest
 out = run();
-const allTps = [...out.matchAll(/chat: \/tp @s/g)].length;
+const allTps = blockTps(chatsOf(out)).length;
 check(allTps === plan.blocks.length - 8, `finishes the remaining ${plan.blocks.length - 8} blocks`);
 const levelOrder = [...out.matchAll(/Level y=(-?\d+): (\w+)/g)].map(m => `${m[2][0]}${m[1]}`);
 check(levelOrder.join() === plan.levels.slice(1).map(l => `${l.kind[0]}${l.y}`).join(), 'places every remaining level in order: ' + levelOrder.join(' '));
@@ -62,7 +66,7 @@ fs.rmSync(prog, { force: true });
 // start part-way (earlier blocks already built): no layer refills below it
 const startAt = 30;
 out = ask(`2|${plan.corner.x} ${plan.corner.y} ${plan.corner.z}|${startAt}|2|n|n`);
-const firstTp = (out.match(/chat: (\/tp @s [^\n]*)/) || [])[1];
+const firstTp = blockTps(chatsOf(out))[0];
 check(firstTp === `/tp @s ${plan.blocks[startAt - 1].x + 0.5} ${plan.blocks[startAt - 1].y + 2} ${plan.blocks[startAt - 1].z + 0.5} 0 90`, `start at block ${startAt}: goes straight to it`);
 check(!/chat: \/fill .* command_block/.test(out.split(firstTp)[0]) && out.includes(`/setblock ${plan.blocks[startAt - 1].x} ${plan.blocks[startAt - 1].y} ${plan.blocks[startAt - 1].z} command_block`), 'start part-way: doesn\'t refill built layers, re-places that block fresh');
 fs.rmSync(prog, { force: true });

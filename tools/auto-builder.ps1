@@ -11,7 +11,7 @@
     5. clicks Delay in Ticks and types the delay
     6. presses Esc (closes and saves)
 
-  Keys while it runs:  F9 = pause / resume    F12 = stop (progress is saved, run again to resume)
+  Keys while it runs:  F9 = STOP right away (progress is saved, run again to resume)    F10 = pause / resume
   Chat commands are typed like a player would: press / (opens chat with the /), type the rest, press Enter.
   Uses only what ships with Windows (PowerShell 5.1+). -DryRun prints every action instead of doing it.
 #>
@@ -109,6 +109,21 @@ namespace Bdm {
       i.U.mi.dwFlags = flags; i.U.mi.mouseData = unchecked((uint)data);
       Send(i);
     }
+    // F9 = kill switch: a background thread that stops the builder at once, even in the middle of typing.
+    // It lets go of Shift and Ctrl first so nothing stays held down.
+    public static void StartKillWatch() {
+      System.Threading.Thread t = new System.Threading.Thread(delegate () {
+        while (true) {
+          if ((GetAsyncKeyState(0x78) & 0x8000) != 0) {
+            try { ReleaseModifiers(); } catch { }
+            Console.WriteLine("STOPPED (F9). Progress is saved: run the builder again to resume.");
+            Environment.Exit(0);
+          }
+          System.Threading.Thread.Sleep(30);
+        }
+      });
+      t.IsBackground = true; t.Start();
+    }
     public static string ForegroundTitle() {
       StringBuilder sb = new StringBuilder(256);
       GetWindowText(GetForegroundWindow(), sb, 256);
@@ -120,7 +135,7 @@ namespace Bdm {
   [void][Bdm.Win]::SetProcessDPIAware()
 }
 
-$VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
+$VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010 }
 
 $script:speedMul = 1.0
@@ -157,15 +172,15 @@ function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::
 function Cursor { $p = New-Object Bdm.Win+POINT; [void][Bdm.Win]::GetCursorPos([ref]$p); return @{ x = $p.X; y = $p.Y } }
 function Beep([int]$f = 880) { if (-not $DryRun) { try { [Console]::Beep($f, 120) } catch {} } }
 
-# Waits for F8 (continue) or F12 (stop)
+# Waits for F8 (continue) or F9 (stop)
 function WaitF8 {
   if ($DryRun) { return }
-  while (-not (Pressed $VK.F8)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 30 }
+  while (-not (Pressed $VK.F8)) { if (Pressed $VK.F9) { throw 'STOP' }; Start-Sleep -Milliseconds 30 }
   while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }
 }
 function StepPause([string]$what) {
   if (-not $Step -or $DryRun) { return }
-  Log "  NEXT: $what   (F8 = do it, F12 = stop)" 'Magenta'
+  Log "  NEXT: $what   (F8 = do it, F9 = stop)" 'Magenta'
   WaitF8
 }
 function WaitForKey([int]$vk) {
@@ -189,7 +204,7 @@ function Ask([string]$question, [bool]$default = $true) {
 }
 
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800 }
+$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800; beforeFill = 2000 }
 
 # Sends a chat command: press "/" (opens chat with the "/" already typed), type the rest, Enter.
 function Chat([string]$command) {
@@ -237,12 +252,12 @@ function FillBlock($b) {
 
 # ---------------------------------------------------------------- pause / stop / focus
 function CheckKeys {
-  if (Pressed $VK.F12) { throw 'STOP' }
-  if (Pressed $VK.F9) {
-    while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }
-    Log '  PAUSED. Press F9 to continue (F12 to stop).' 'Yellow'; Beep 500
-    while (-not (Pressed $VK.F9)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 50 }
-    while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }
+  if (Pressed $VK.F9) { throw 'STOP' }
+  if (Pressed $VK.F10) {
+    while (Pressed $VK.F10) { Start-Sleep -Milliseconds 30 }
+    Log '  PAUSED. Press F10 to continue (F9 to stop).' 'Yellow'; Beep 500
+    while (-not (Pressed $VK.F10)) { if (Pressed $VK.F9) { throw 'STOP' }; Start-Sleep -Milliseconds 50 }
+    while (Pressed $VK.F10) { Start-Sleep -Milliseconds 30 }
     Log '  Continuing in 2 seconds...' 'Green'; Start-Sleep -Seconds 2
   }
 }
@@ -251,7 +266,7 @@ function EnsureMinecraft {
   $warned = $false
   while ([Bdm.Win]::ForegroundTitle() -notmatch 'Minecraft') {
     if (-not $warned) { Log '  Waiting: click on the Minecraft window to continue (the builder pauses whenever Minecraft is not in front).' 'Yellow'; Beep 400; $warned = $true }
-    if (Pressed $VK.F12) { throw 'STOP' }
+    if (Pressed $VK.F9) { throw 'STOP' }
     Start-Sleep -Milliseconds 200
   }
   if ($warned) { Log '  Minecraft is in front again, continuing in 2 seconds...' 'Green'; Start-Sleep -Seconds 2 }
@@ -273,7 +288,7 @@ function FindPlan {
 # ---------------------------------------------------------------- calibration (one time: you click, the builder records)
 function WaitClick {
   while (Pressed 0x01) { Start-Sleep -Milliseconds 20 }
-  while (-not (Pressed 0x01)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 20 }
+  while (-not (Pressed 0x01)) { if (Pressed $VK.F9) { throw 'STOP' }; Start-Sleep -Milliseconds 20 }
   $pt = Cursor
   while (Pressed 0x01) { Start-Sleep -Milliseconds 20 }
   Log "   got $($pt.x),$($pt.y)" 'Green'
@@ -303,13 +318,13 @@ function Calibrate($firstBlock) {
     Combo $VK.A; for ($i = 0; $i -lt 7; $i++) { Tap $VK.Back }
     TypeText '0'
     Log 'Did the command show up in Command Input, and Delay in Ticks show 67 and then 0?' 'Yellow'
-    Log '   F8 = YES, save it    F9 = NO, do it again' 'Yellow'
+    Log '   F8 = YES, save it    F10 = NO, do it again    (F9 = stop)' 'Yellow'
     Beep
     $ok = $false
     while ($true) {
       if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; $ok = $true; break }
-      if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; break }
-      if (Pressed $VK.F12) { throw 'STOP' }
+      if (Pressed $VK.F10) { while (Pressed $VK.F10) { Start-Sleep -Milliseconds 30 }; break }
+      if (Pressed $VK.F9) { throw 'STOP' }
       Start-Sleep -Milliseconds 30
     }
     Tap $VK.Esc; Start-Sleep -Milliseconds 800
@@ -344,7 +359,7 @@ function ShiftPlan([int]$dx, [int]$dy, [int]$dz) {
 
 # ================================================================ main
 Log '=== Bedrock Music Maker: Auto Builder ===' 'Cyan'
-Log 'F9 = pause / resume     F12 = stop (progress is saved)' 'Cyan'
+Log 'F9 = STOP right away (progress is saved)     F10 = pause / resume' 'Cyan'
 if ($DryRun) { Log '(dry run: nothing is pressed, every action is printed)' 'DarkGray' }
 
 $planPath = FindPlan
@@ -434,6 +449,7 @@ Log '  - the / key opens chat (Minecraft''s default)'
 Log 'Then click into Minecraft and press F8. The builder takes over the keyboard and mouse: don''t touch them.' 'Yellow'
 Beep; WaitForKey $VK.F8
 EnsureMinecraft
+if (-not $DryRun) { [Bdm.Win]::StartKillWatch() }   # from here on F9 stops everything at once
 if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run was killed with Shift or Ctrl held
 
 $fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)
@@ -457,6 +473,12 @@ try {
     if ($prog.levelsDone -notcontains $lv.y) {
       CheckKeys; EnsureMinecraft
       Log ("Level y={0}: {1}" -f $lv.y, $lv.kind) 'Cyan'
+      # teleport there first and wait (so that area is loaded), then fill
+      $f = [regex]::Match($lv.fill, '^/fill (-?\d+) (-?\d+) (-?\d+)')
+      if ($f.Success) {
+        Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ([int]$f.Groups[1].Value + 0.5)), (Fmt ([int]$f.Groups[2].Value + 2)), (Fmt ([int]$f.Groups[3].Value + 0.5)))
+        Wait $T.beforeFill
+      }
       Chat $lv.fill
       $prog.levelsDone += $lv.y; SaveProgress
     }
