@@ -104,6 +104,12 @@ namespace Bdm {
       if ((shift & 1) != 0) { Key(0x10, true, useScan); System.Threading.Thread.Sleep(gapMs); }
       return true;
     }
+    // moves the mouse by a few pixels (relative, like a real mouse)
+    public static void Nudge(int dx, int dy) {
+      INPUT i = new INPUT(); i.type = INPUT_MOUSE;
+      i.U.mi.dx = dx; i.U.mi.dy = dy; i.U.mi.dwFlags = 0x0001;
+      Send(i);
+    }
     public static void Mouse(uint flags, int data) {
       INPUT i = new INPUT(); i.type = INPUT_MOUSE;
       i.U.mi.dwFlags = flags; i.U.mi.mouseData = unchecked((uint)data);
@@ -167,7 +173,7 @@ function TypeText([string]$text) {
 }
 function MoveTo($p) { Act "move to $($p.x),$($p.y)"; if (-not $DryRun) { [void][Bdm.Win]::SetCursorPos($p.x, $p.y); Start-Sleep -Milliseconds 40 } }
 function LeftClick($p) { MoveTo $p; Act 'left click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.LeftDown, 0); Start-Sleep -Milliseconds 40; [Bdm.Win]::Mouse($M.LeftUp, 0) } }
-function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 50; [Bdm.Win]::Mouse($M.RightUp, 0) } }
+function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 150; [Bdm.Win]::Mouse($M.RightUp, 0) } }
 function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::GetAsyncKeyState($vk) -band 0x8000) -ne 0 }
 function Cursor { $p = New-Object Bdm.Win+POINT; [void][Bdm.Win]::GetCursorPos([ref]$p); return @{ x = $p.X; y = $p.Y } }
 function Beep([int]$f = 880) { if (-not $DryRun) { try { [Console]::Beep($f, 120) } catch {} } }
@@ -204,7 +210,7 @@ function Ask([string]$question, [bool]$default = $true) {
 }
 
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800; beforeFill = 2000 }
+$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800; beforeFill = 2000; beforeClick = 800 }
 
 # Sends a chat command: press "/" (opens chat with the "/" already typed), type the rest, Enter.
 function Chat([string]$command) {
@@ -230,8 +236,14 @@ function TypeInto($pt, [string]$text, [int]$backs) {
 function Fmt([double]$v) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
 function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))); Wait $T.tp }
 
+# Right after chat closes Minecraft takes the mouse back and ignores the first click (like the first key
+# after chat opens). So: wait, wiggle the mouse a pixel, right-click, and right-click once more (a second
+# right-click on an open command block screen does nothing).
 function OpenBlock {
   StepPause 'right-click the block below you'
+  Wait $T.beforeClick
+  if (-not $DryRun) { [Bdm.Win]::Nudge(1, 0); Start-Sleep -Milliseconds 60; [Bdm.Win]::Nudge(-1, 0); Start-Sleep -Milliseconds 200 }
+  RightClick; Wait 600
   RightClick; Wait $T.open
 }
 
@@ -301,7 +313,7 @@ function Calibrate($firstBlock) {
   while ($true) {
     Log 'The builder opens the first command block for you...'
     TpAbove $firstBlock
-    RightClick; Start-Sleep -Milliseconds ([int](1500 * $script:speedMul))
+    OpenBlock
     Log ''
     Log '0) The command block screen should be open. If not, right-click the block below you yourself.' 'White'
     Log '1) Click the BOTTOM of the scroll bar on the LEFT side (the left panel scrolls down).' 'White'
