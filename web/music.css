@@ -65,6 +65,7 @@ body:not(.slab-mode) .slab-only { display: none !important; }
 #seek { flex: 1; accent-color: var(--accent); }
 #seekTime { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: 12px; }
 body.slab-mode .not-slab { display: none !important; }
+body.full-mode .not-full { display: none !important; }
 #slabSettings { margin-top: 8px; }
 .pos { font-family: Consolas, monospace; color: var(--blue); white-space: nowrap; }
 .dly { font-family: Consolas, monospace; color: var(--warn); white-space: nowrap; }

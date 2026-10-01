@@ -158,6 +158,20 @@ check(r.rows.flatMap(x => x.events).every(e => / @p ~ ~ ~ [\d.]+ [\d.]+$/.test(e
 r = await setNum('#transpose', 2);
 check(r.rows.length > 0, 'transpose updates live');
 
+// ---- 6b. detail: every note at its exact pitch ----
+r = await change(() => page.click('#detail [data-v=full]'));
+const full = await page.evaluate(() => {
+  const s = MM.state.settings, m = MM.state.midi;
+  const ev = MM.state.song.rows.flatMap(x => x.events).filter(e => !e.drum);
+  const src = new Set(m.tonal.flatMap(t => t.notes.filter(n => n.time >= s.start && n.time < s.start + s.length))
+    .filter(n => n.midi + s.transpose >= 54 || s.mode2 === 'bass').map(n => `${Math.round((n.time - s.start) / MM.state.song.stepSec)}:${n.midi}`));
+  return { placed: ev.length, unique: src.size, wrong: ev.filter(e => e.midi !== e.orig + s.transpose).length,
+    inRange: ev.every(e => Math.abs(e.midi - MM.INSTRUMENTS[e.sound].center) <= 12), info: document.querySelector('#detailInfo').textContent };
+});
+check(full.placed === full.unique && full.wrong === 0 && full.inRange, `every note: all ${full.unique} chord and melody notes placed, each at its exact pitch (${full.wrong} moved)`);
+check(/\d+ blocks for this part, about .+ to auto-build/.test(full.info) && !(await page.locator('#src1').isVisible()), 'every note: shows blocks and build time, hides the per-layer track pickers');
+r = await change(() => page.click('#detail [data-v=simple]'));
+
 // ---- 7. slab (auto-builder) mode ----
 r = await change(() => page.click('#ticks [data-v="1"]'));
 r = await change(() => page.click('#build [data-v=slab]'));

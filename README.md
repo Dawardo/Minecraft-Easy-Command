@@ -14,6 +14,7 @@ Turn a **MIDI file** into **Minecraft: Bedrock Edition** command block `/playsou
    - **Notes from**: which track a layer uses, or Auto.
    - **ON/OFF**: a switch for bass and for drums/harmony.
    - **The part**: on the timeline under the file, drag the green edges (or drag across) to choose where it starts and ends, and **Play part** to hear it. The slider below shows how far along it is (white line on the timeline); drag it to rewind or skip. **Stop** keeps the position. Start and length can also be typed.
+   - **Detail**: *Simple* (tune, bass line, drums) or *Every note*: every note of every track gets its own block at its exact pitch, using whichever note block instrument covers it (your instruments first, then harp, bass, guitar, flute, bell: F#1 to F#7). More blocks, so a longer build; the page shows the block count and build time.
    - **The rest**: the speed grid, transpose, who hears it, and the build style.
 4. **▶ Minecraft preview** plays roughly what the note blocks will sound like; **▶ Original** plays every MIDI track.
 5. Build it with **Copy next**: each click (or <kbd>Space</kbd>) copies the next command and tells you which repeater delay to set before it.

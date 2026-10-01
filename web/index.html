@@ -48,6 +48,11 @@
 
     <div class="card">
       <h3>2. Sound</h3>
+      <label>Detail</label>
+      <div class="seg" id="detail">
+        <button data-v="simple" class="active">Simple: 3 layers</button><button data-v="full">Every note (exact)</button>
+      </div>
+      <div class="hint" id="detailInfo">Simple keeps the tune, a bass line and drums. Every note keeps every chord note at its exact pitch: more blocks, longer to build.</div>
       <label class="not-slab">Speed grid (repeater ticks per step)</label>
       <div class="seg not-slab" id="ticks">
         <button data-v="1" class="active">1 tick (0.1 s)</button><button data-v="2">2 ticks (0.2 s)</button>
@@ -57,12 +62,12 @@
       <div class="layer" id="layer1">
         <div class="layer-head"><b>1. Melody</b><span class="onoff">ON</span></div>
         <label>Instrument</label><select id="inst1"></select>
-        <label>Notes from</label><select id="src1"><option value="auto">Auto</option></select>
+        <label class="not-full">Notes from</label><select id="src1" class="not-full"><option value="auto">Auto</option></select>
       </div>
       <div class="layer" id="layer2">
         <div class="layer-head"><label class="switch"><input type="checkbox" id="on2" checked> <b>2. Bass</b></label><span class="onoff" id="state2">ON</span></div>
         <label>Instrument</label><select id="inst2"></select>
-        <label>Notes from</label><select id="src2"><option value="auto">Auto</option></select>
+        <label class="not-full">Notes from</label><select id="src2" class="not-full"><option value="auto">Auto</option></select>
       </div>
       <div class="layer" id="layer3">
         <div class="layer-head"><label class="switch"><input type="checkbox" id="on3" checked> <b>3. Drums / harmony</b></label><span class="onoff" id="state3">ON</span></div>
@@ -73,7 +78,7 @@
           <option value="harmony">Harmony only</option>
         </select>
         <label>Harmony instrument</label><select id="inst3" class="harm"></select>
-        <label>Harmony notes from</label><select id="src3" class="harm"><option value="auto">Auto</option></select>
+        <label class="not-full">Harmony notes from</label><select id="src3" class="harm not-full"><option value="auto">Auto</option></select>
         <div class="hint" id="drumInfo">Drums use note.bd (kick), note.snare and note.hat.</div>
       </div>
 

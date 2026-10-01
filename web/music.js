@@ -25,6 +25,16 @@ const INSTRUMENTS = {
   'note.didgeridoo': { label: 'Didgeridoo', center: 42, synth: 'bass' },
 };
 const DRUMS = { kick: 'note.bd', snare: 'note.snare', hat: 'note.hat' };
+// "Every note": instruments that together cover MIDI 30..102 (F#1..F#7) at exact pitch, two octaves each
+const COVER = ['note.harp', 'note.bass', 'note.guitar', 'note.flute', 'note.bell'];
+/** The first instrument (yours first, then COVER) whose two octaves hold this note, so it plays at its real pitch.
+ *  Only notes outside every range (below F#1, above F#7) move by octaves. */
+function exactInstrument(m, prefs) {
+  while (m < 30) m += 12;
+  while (m > 102) m -= 12;
+  const sound = [...prefs, ...COVER].find(k => Math.abs(m - INSTRUMENTS[k].center) <= 12);
+  return { sound, midi: m, pitch: Math.pow(2, (m - INSTRUMENTS[sound].center) / 12) };
+}
 const LAYER_COLORS = ['#5dbb63', '#5a9be5', '#e0b341'];
 
 // ---------- helpers ----------
@@ -86,6 +96,30 @@ function buildSong(tracks, s) {
   };
   // chords (e.g. from a MIDI piano part): melody keeps the top note, bass the bottom note
   const byPitch = (notes, dir) => [...notes].sort((a, b) => a.t - b.t || dir * (a.midi - b.midi));
+  if (s.detail === 'full') {
+    // Every note: each note of every track at its exact pitch (only exact repeats on the same tick merge).
+    // Layer = colour only: 0 = notes from F#3 up, 1 = low notes, 2 = drums. The top note of a chord is loudest.
+    const prefs = [s.inst1, ...(s.mode2 === 'bass' ? [s.inst2] : []), s.inst3];
+    const top = new Map();
+    for (const n of tracks.all) top.set(stepOf(n.t), Math.max(top.get(stepOf(n.t)) ?? -1, n.midi));
+    for (const n of tracks.all) {
+      const m = n.midi + s.transpose;
+      if (m < 54 && s.mode2 !== 'bass') continue;   // bass switched off: no low notes
+      const p = exactInstrument(m, prefs), k = stepOf(n.t);
+      if (!steps.has(k)) steps.set(k, []);
+      const row = steps.get(k);
+      if (row.some(e => e.sound === p.sound && e.midi === p.midi)) continue;
+      row.push({ layer: m < 54 ? 1 : 0, ...p, orig: n.midi, vol: n.midi === top.get(k) ? 1 : m < 54 ? 0.9 : 0.75 });
+    }
+    if (s.mode3 === 'drums' || s.mode3 === 'auto') {
+      for (const d of tracks.drums) {
+        const k = stepOf(d.t);
+        if (!steps.has(k)) steps.set(k, []);
+        if (steps.get(k).some(e => e.drum === d.kind)) continue;
+        steps.get(k).push({ layer: 2, sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
+      }
+    }
+  } else {
   for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 });
   if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 });
   // layer 3: drums where the song has drums; harmony fills the rest (in "auto"), or one of them only
@@ -99,11 +133,12 @@ function buildSong(tracks, s) {
       put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 });
     }
   }
+  }
 
   const keys = [...steps.keys()].sort((a, b) => a - b);
   let prev = null;
   const rows = keys.map(k => {
-    const events = steps.get(k).sort((a, b) => a.layer - b.layer);
+    const events = steps.get(k).sort((a, b) => a.layer - b.layer || (b.midi ?? 0) - (a.midi ?? 0));
     const waitTicks = prev === null ? 0 : (k - prev) * stepTicks / 2;   // repeater ticks (repeater and chain styles)
     prev = k;
     return { step: k, time: k * stepSec, waitTicks, events: events.map(e => ({ ...e, cmd: playsound(e, s) })) };
@@ -410,6 +445,7 @@ function readSettings() {
     transpose: Math.max(-12, Math.min(12, Math.round(+$('#transpose').value || 0))),
     target: $('#target').value,
     build: segValue('build'),
+    detail: segValue('detail'),
     slab: {
       x: Math.round(+$('#slabX').value || 0), y: Math.round(+$('#slabY').value || 0), z: Math.round(+$('#slabZ').value || 0),
       w: Math.max(1, Math.min(64, Math.round(+$('#slabW').value || 16))), d: Math.max(1, Math.min(64, Math.round(+$('#slabD').value || 16))),
@@ -428,6 +464,7 @@ function fillInstruments() {
 /** Grey out what a switched-off layer doesn't use, and show ON/OFF in words. */
 function syncLayers() {
   document.body.classList.toggle('slab-mode', segValue('build') === 'slab');
+  document.body.classList.toggle('full-mode', segValue('detail') === 'full');
   const on2 = $('#on2').checked, on3 = $('#on3').checked, m3 = $('#mode3').value;
   $$('#layer2 select').forEach(e => (e.disabled = !on2));
   $('#mode3').disabled = !on3;
@@ -547,7 +584,8 @@ function midiTracks(s) {
     .sort((a, b) => a.t - b.t || ['kick', 'snare', 'hat'].indexOf(a.kind) - ['kick', 'snare', 'hat'].indexOf(b.kind));
   // auto layer 3: harmony only where the drums are resting
   const harm = s.mode3 === 'auto' ? harmony.filter(n => !drumTracks.some(t => playsAt(t, n.t + s.start))) : harmony;
-  return { mel, bass, harmony: harm, drums };
+  const all = m.tonal.flatMap(notesOf).sort((a, b) => a.t - b.t || b.midi - a.midi);
+  return { mel, bass, harmony: harm, drums, all };
 }
 
 async function loadFile(file) {
@@ -579,12 +617,14 @@ function convert() {
   if (part !== player.part) { player.part = part; if (player.kind) stopAll(); player.pos = null; }
   showPos();
   $('#status').textContent = `Updated (${state.steps.length} command blocks).`;
+  $('#detailInfo').textContent = `${s.detail === 'full' ? 'Every note at its exact pitch' : 'Simple: tune, bass line and drums'}: ${state.steps.length} blocks for this part, about ${fmtDuration(state.steps.length * 15)} to auto-build.`;
   renderResult();
 }
 
 /** Plain-words reasons for an empty layer. */
 function layerWarnings(s) {
   const m = state.midi, warn = [], end = s.start + s.length;
+  if (s.detail === 'full') return state.song.rows.length ? [] : [`No notes in ${s.start}–${end.toFixed(1)} s.`];
   const count = (l, f = () => true) => state.song.rows.filter(r => r.events.some(e => e.layer === l && f(e))).length;
   const range = `${s.start}–${end.toFixed(1)} s`;
   const why = idx => {
@@ -614,7 +654,13 @@ function renderResult() {
     return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => state.midi.tracks.find(t => t.idx === +i)?.name).join(', ');
   };
   const drumsN = n(2, e => e.drum), harmN = n(2, e => !e.drum);
-  const layers = [
+  const evs = l => song.rows.reduce((a, r) => a + r.events.filter(e => e.layer === l).length, 0);
+  const soundsOf = l => [...new Set(song.rows.flatMap(r => r.events.filter(e => e.layer === l).map(e => INSTRUMENTS[e.sound]?.label)))].filter(Boolean).join(', ');
+  const layers = s.detail === 'full' ? [
+    `Every note, F#3 and up · ${evs(0)} notes (${soundsOf(0)})`,
+    evs(1) ? `Low notes · ${evs(1)} (${soundsOf(1)})` : null,
+    evs(2) ? `Drums · ${evs(2)} hits` : null,
+  ] : [
     `Melody: ${INSTRUMENTS[s.inst1].label} · ${n(0)} notes${used('mel') ? ` from ${used('mel')}` : ''}`,
     s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label} · ${n(1)} notes${used('bass') ? ` from ${used('bass')}` : ''}` : null,
     s.mode3 === 'off' ? null : [
@@ -641,7 +687,7 @@ function renderResult() {
       <canvas class="roll" id="roll"></canvas>
       <div class="legend-row">${layers.map((l, i) => l ? `<span><i class="swatch" style="background:${LAYER_COLORS[i]}"></i>${esc(l)}</span>` : '').join('')}</div>
       ${warnings.map(w => `<p class="warnline">&#9888; ${esc(w)}</p>`).join('')}
-      ${slab ? `<p class="hint">Auto-build time: about ${fmtDuration(blocks * 3)} (roughly 3 s per block; longer on a laggy Realm). You can stop and resume any time.</p>`
+      ${slab ? `<p class="hint">Auto-build time: about ${fmtDuration(blocks * 15)} (roughly 15 s per block; longer on a laggy Realm). You can stop and resume any time.</p>`
         : blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part or the 2-tick grid.</p>` : ''}
     </div>
 
