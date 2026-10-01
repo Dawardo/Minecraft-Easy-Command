@@ -13,7 +13,7 @@
     <span class="logo">&#9835;</span>
     <div>
       <div class="title">Bedrock Music Maker</div>
-      <div class="subtitle">MP3 &rarr; <b>Bedrock</b> command block <span class="code">/playsound</span> commands</div>
+      <div class="subtitle">MP3 or MIDI &rarr; <b>Bedrock</b> command block <span class="code">/playsound</span> commands</div>
     </div>
   </div>
   <div class="actions"><a class="navlink" href="dialogue.html">Dialogue maker (paused) &rarr;</a></div>
@@ -24,21 +24,32 @@
     <div class="card">
       <h3>1. Song</h3>
       <label class="drop" id="drop">
-        <input type="file" id="file" accept="audio/*,.mp3,.wav,.ogg,.m4a" hidden>
-        <span id="dropText">Drop an MP3 here or <u>click to choose</u></span>
+        <input type="file" id="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.mid,.midi" hidden>
+        <span id="dropText">Drop an MP3 or MIDI file here or <u>click to choose</u></span>
       </label>
       <div class="grid2">
         <div><label>Start at (seconds)</label><input type="number" id="start" value="0" min="0" step="0.5"></div>
         <div><label>Length (seconds)</label><input type="number" id="length" value="20" min="1" step="1"></div>
       </div>
       <div class="hint" id="songInfo">Every note becomes a command block, so start with 10–30 seconds.</div>
+      <div class="hint tip">&#128161; <b>Best results:</b> use a <b>MIDI file</b> of the song if you can find one (search "song name midi"). It has the exact notes. MP3s have to be "listened to" and are never perfect.</div>
+      <div id="midiTracks" class="midi-only"></div>
     </div>
 
     <div class="card">
       <h3>2. Sound</h3>
+      <div id="audioOnly" class="audio-only">
+      <label>Listening engine</label>
+      <div class="seg" id="engine">
+        <button data-v="ai" class="active">AI (best)</button><button data-v="quick">Quick</button>
+      </div>
+      <div class="hint">AI uses Spotify's Basic Pitch model on your PC, focused on the vocal. Takes a few seconds longer.</div>
+      </div>
+      <div class="audio-only">
       <label>Detail</label>
       <div class="seg" id="detail">
         <button data-v="1" class="active">Simple tune</button><button data-v="2">Normal</button><button data-v="3">Detailed</button>
+      </div>
       </div>
       <label>Speed grid (repeater ticks per step)</label>
       <div class="seg" id="ticks">
@@ -71,6 +82,7 @@
             <option value="p">Nearest player (@p)</option>
           </select></div>
       </div>
+      <label class="check audio-only"><input type="checkbox" id="inKey" checked> Keep notes in the song's key (fixes stray wrong notes)</label>
       <label>Build style</label>
       <div class="seg" id="build">
         <button data-v="repeater" class="active">Repeaters</button><button data-v="chain">Chain blocks (no redstone)</button>
@@ -94,6 +106,7 @@
   </main>
 </div>
 <div class="toast hidden" id="toast"></div>
+<script src="vendor/vendor.js"></script>
 <script src="music.js"></script>
 </body>
 </html>
