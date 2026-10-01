@@ -466,14 +466,14 @@ Log "Commands are $(if ($script:paste) { 'pasted' } else { 'typed key by key' })
 # progress
 $progFile = "$planPath.progress.json"
 if ($DryRun) { $progFile = "$planPath.dryrun-progress.json" }
-$prog = @{ next = 0; levelsDone = @(); offset = @(0, 0, 0) }
+$prog = @{ next = 0; levelsDone = @(); offset = @(0, 0, 0); soundAt = '' }
 $resuming = $false
 if (Test-Path $progFile) {
   $old = Get-Content $progFile -Raw | ConvertFrom-Json
   if ($old.next -gt 0 -or @($old.levelsDone).Count -gt 0) {
     if (Ask "Resume where it stopped (block $($old.next + 1) of $($blocks.Count))?") {
       $off = @(0, 0, 0); if ($old.offset) { $off = @($old.offset | ForEach-Object { [int]$_ }) }
-      $prog = @{ next = [int]$old.next; levelsDone = @($old.levelsDone | ForEach-Object { [int]$_ }); offset = $off }
+      $prog = @{ next = [int]$old.next; levelsDone = @($old.levelsDone | ForEach-Object { [int]$_ }); offset = $off; soundAt = [string]$old.soundAt }
       $resuming = $true
     }
   }
@@ -498,6 +498,18 @@ if ($resuming) {
   $prog.offset = @(($nums[0] - [int]$p.corner.x), ($nums[1] - [int]$p.corner.y), ($nums[2] - [int]$p.corner.z))
   ShiftPlan $prog.offset[0] $prog.offset[1] $prog.offset[2]
   Log ("Building at {0} {1} {2}." -f $nums[0], $nums[1], $nums[2]) 'Green'
+  # where the notes are heard from
+  Log ''
+  Log 'Where should the music play from? Normally each note sounds at its own command block (~ ~ ~).' 'White'
+  Log '  Or give one spot (a stage, a speaker, the middle of your base) and every note plays from there.'
+  while ($true) {
+    $a = Prompt 'Press Enter for "at each command block", or type x y z, like  130 70 -20'
+    if ([string]::IsNullOrWhiteSpace($a)) { break }
+    $xyz = @([regex]::Matches($a, '-?\d+(\.\d+)?') | ForEach-Object { $_.Value })
+    if ($xyz.Count -ne 3) { Log '  Type three numbers: x y z (or just press Enter).' 'Yellow'; continue }
+    $prog.soundAt = $xyz -join ' '
+    break
+  }
   # which block to start from
   $sb = Prompt "Start at block 1? Press Enter, or type a block number (1-$($blocks.Count)) if earlier ones are already built"
   if ($sb.Trim() -match '^\d+$' -and [int]$sb.Trim() -gt 1 -and [int]$sb.Trim() -le $blocks.Count) {
@@ -509,6 +521,12 @@ if ($resuming) {
     Log "Starting at block $($prog.next + 1)." 'Green'
   }
 }
+
+# play every note from one spot: the "~ ~ ~" in each /playsound becomes that x y z
+if ($prog.soundAt) {
+  $script:blocks = @($script:blocks | ForEach-Object { [pscustomobject]@{ x = $_.x; y = $_.y; z = $_.z; delay = $_.delay; command = ($_.command -replace ' ~ ~ ~ ', " $($prog.soundAt) ") } })
+  Log "Notes play from $($prog.soundAt)." 'Green'
+} else { Log 'Notes play at each command block.' }
 
 if ($Limit -lt 0 -and -not $Yes) {
   $t = Prompt 'Test run first? Enter how many blocks to build (e.g. 10), or press Enter for the whole song'

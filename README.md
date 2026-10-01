@@ -48,6 +48,7 @@ Realms can't load your own files, so the builder fills every command block **thr
    - **typing or pasting**: typing key by key is the default and works; pasting is much faster (try it with a test run first)
    - **where to build** (always asked): type the corner like `120 64 -35`; `x 0 z 0` isn't allowed. Turn on coordinates with `/gamerule showcoordinates true` and use the Position shown where you stand. (A resumed build keeps its corner.)
    - **set up the clicks again?** (only if a setup is saved): say yes if clicks landed in the wrong place
+   - **where the music plays from**: Enter = each note sounds at its own command block (`~ ~ ~`), or type one `x y z` (a stage, a speaker) and every `/playsound` plays from there
    - **which block to start from**: if earlier ones are already built
    - **a test run** (e.g. 10 blocks), with an optional **step-by-step** mode (F8 before every action)
 3. In Minecraft: Creative, flying, operator, near the corner, with the area empty. Click into Minecraft: the builder starts 3 seconds later.
