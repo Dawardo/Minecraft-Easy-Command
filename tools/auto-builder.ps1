@@ -176,7 +176,7 @@ namespace Bdm {
   [void][Bdm.Win]::SetProcessDPIAware()
 }
 
-$VK = @{ Slash = 0xBF; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
+$VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010; Wheel = 0x0800 }
 
 $script:speedMul = 1.0
@@ -288,7 +288,7 @@ function ShotBox($box) {
 }
 
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 700; afterPaste = 250; afterEnter = 600; tp = 500; openTimeout = 4000; settle = 300; click = 200; scroll = 350; closeTimeout = 3000 }
+$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; openTimeout = 4000; settle = 300; click = 200; scroll = 350; closeTimeout = 3000 }
 
 # Sends a chat command. If Minecraft answers with a red error (letters went missing on the way), it's sent again.
 # -MayFail: a red answer is fine (clearing air that's already air), so don't check.
@@ -300,6 +300,9 @@ function Chat([string]$command, [switch]$MayFail) {
     # the T land in the chat too ("t/tell").
     StepPause "press / and type: $command"
     TapScan $VK.Slash; Wait $T.chatOpen
+    # Minecraft eats the first key after chat opens ("/tp" arrived as "/p", "/fill" as "/ill"), so the first
+    # key is a throwaway End (no letter; if it does arrive it just moves to the end of the "/")
+    Tap $VK.End; Wait 300
     TypeText ($command -replace '^/', ''); Wait $T.afterPaste
     StepPause 'press Enter'
     Tap $VK.Enter; Wait $T.afterEnter

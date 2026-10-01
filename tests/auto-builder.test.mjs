@@ -33,7 +33,7 @@ check(tps.length === 5 && tps.every((c, i) => c === `/tp @s ${plan.blocks[i].x +
 const clips = [...out.matchAll(/type: (.*)/g)].map(m => m[1]);
 check(plan.blocks.slice(0, 5).every(b => clips.includes(b.command.slice(1)) && clips.includes(String(b.delay))), 'pastes each command and its Delay in Ticks');
 check(/right click[\s\S]*move to[\s\S]*type: playsound[\s\S]*wheel down 12[\s\S]*type: \d+[\s\S]*key 27/.test(out), 'per block: right-click, Command Input, scroll, Delay, Esc');
-check(/key 191 \(scan\)\s+\[dry\] type: tp @s [^\n]*\s+\[dry\] key 13/.test(out) && !/type: \//.test(out), 'chat: presses /, types the command without its /, then Enter');
+check(/key 191 \(scan\)\s+\[dry\] key 35\s+\[dry\] type: tp @s [^\n]*\s+\[dry\] key 13/.test(out) && !/type: \//.test(out), 'chat: presses /, a throwaway End, types the command without its /, then Enter');
 check(/Test run finished: built up to block 5/.test(out), 'test run stops after 5 blocks');
 
 // resume: replaces the next block fresh, continues at block 6
