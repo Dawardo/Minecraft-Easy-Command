@@ -17,7 +17,7 @@
 #>
 param(
   [Parameter(Position = 0)][string]$Plan,
-  [ValidateSet('fast', 'normal', 'slow', 'veryslow')][string]$Speed = '',
+  [ValidateSet('250', '500', '750', '1000')][string]$Speed = '',   # extra delay after every action, in ms
   [int]$Limit = -1,
   [switch]$Recalibrate,            # show the builder where to click again
   [switch]$Step,                   # step-by-step: press F8 before every action (for finding problems)
@@ -144,8 +144,9 @@ namespace Bdm {
 $VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010 }
 
-$script:speedMul = 1.0
-function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ([int]($ms * $script:speedMul)) } }
+# Speed = an extra delay (250 / 500 / 750 / 1000 ms) added to every wait between actions
+$script:gap = 500
+function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ($ms + $script:gap) } }
 function Log([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Act([string]$msg) { if ($DryRun) { Write-Host "  [dry] $msg" -ForegroundColor DarkGray } }
 
@@ -381,17 +382,17 @@ $blocks = @($p.blocks)
 $levels = @($p.levels)
 Log ("Plan: {0}  -  {1} command blocks  -  {2} levels  -  corner {3} {4} {5}" -f $p.song, $blocks.Count, $levels.Count, $p.corner.x, $p.corner.y, $p.corner.z)
 
-$speedName = $Speed
-if (-not $speedName) {
-  $speedName = 'normal'
+$gapName = $Speed
+if (-not $gapName) {
+  $gapName = '500'
   if (-not $Yes) {
-    $s = Prompt 'Speed: 1 = fast, 2 = normal (default), 3 = slow (laggy Realm), 4 = very slow'
-    $pick = @{ '1' = 'fast'; '3' = 'slow'; '4' = 'veryslow' }[$s.Trim()]
-    if ($pick) { $speedName = $pick }
+    $s = Prompt 'Speed (extra delay after every action): 1 = 250 ms, 2 = 500 ms (default), 3 = 750 ms, 4 = 1000 ms'
+    $pick = @{ '1' = '250'; '2' = '500'; '3' = '750'; '4' = '1000' }[$s.Trim()]
+    if ($pick) { $gapName = $pick }
   }
 }
-$script:speedMul = @{ fast = 0.6; normal = 1.0; slow = 1.6; veryslow = 2.5 }[$speedName]
-Log "Speed: $speedName"
+$script:gap = [int]$gapName
+Log "Speed: $($script:gap) ms extra delay after every action"
 
 # progress
 $progFile = "$planPath.progress.json"
@@ -458,9 +459,10 @@ Log 'Before you start, in Minecraft:' 'White'
 Log '  - Creative mode, cheats on, you are an operator (on Realms: the owner or an operator)'
 Log '  - FLYING (double-tap jump), standing near the corner, nothing in the way'
 Log '  - the / key opens chat (Minecraft''s default)'
-Log 'Then click into Minecraft and press F8. The builder takes over the keyboard and mouse: don''t touch them.' 'Yellow'
-Beep; WaitForKey $VK.F8
+Log 'Now click into Minecraft. The builder starts 3 seconds after Minecraft is in front, then takes over the keyboard and mouse: don''t touch them.' 'Yellow'
+Beep
 EnsureMinecraft
+if (-not $DryRun) { for ($n = 3; $n -ge 1; $n--) { Log "  starting in $n..." 'Yellow'; Start-Sleep -Seconds 1 } }
 if (-not $DryRun) { [Bdm.Win]::StartKillWatch() }   # from here on F9 stops everything at once
 if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run was killed with Shift or Ctrl held
 
