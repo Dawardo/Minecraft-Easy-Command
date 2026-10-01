@@ -195,6 +195,30 @@ check(plan.format === 'bedrock-music-maker/slab-plan' && plan.blocks.length === 
 await page.click('#qCopy');
 check((await page.locator('#quick').textContent()).includes('Delay in Ticks'), 'Copy next shows position and Delay in Ticks for hand building');
 
+// ---- 7b. snip editor: drag across the timeline to choose the part ----
+check(await page.locator('#snip').isVisible(), 'snip timeline shows once a song is loaded');
+const dur = await page.evaluate(() => MM.state.midi.midi.duration);
+await page.locator('#snip').scrollIntoViewIfNeeded();
+const box = await page.locator('#snip').boundingBox();
+const vSnip = await version();
+await page.mouse.move(box.x + box.width * 0.25, box.y + box.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2, { steps: 5 });
+await page.mouse.up();
+await page.waitForFunction(x => MM.state.version > x, vSnip, { timeout: 5000 });
+const snipped = await page.evaluate(() => [+document.querySelector('#start').value, +document.querySelector('#length').value, MM.state.settings.start, MM.state.settings.length]);
+check(Math.abs(snipped[0] - dur * 0.25) < 0.3 && Math.abs(snipped[1] - dur * 0.35) < 0.3 && snipped[2] === snipped[0] && Math.abs(snipped[3] - snipped[1]) < 1e-6,
+  `dragging across the timeline sets start and length, and the result updates (${snipped[0]} s + ${snipped[1]} s)`);
+// drag the end edge in
+const endX = box.x + box.width * 0.6;
+const v2 = await version();
+await page.mouse.move(endX, box.y + 10); await page.mouse.down();
+await page.mouse.move(box.x + box.width * 0.45, box.y + 10, { steps: 5 }); await page.mouse.up();
+await page.waitForFunction(x => MM.state.version > x, v2, { timeout: 5000 });
+const afterEnd = await page.evaluate(() => [+document.querySelector('#start').value, +document.querySelector('#length').value]);
+check(afterEnd[0] === snipped[0] && Math.abs(afterEnd[1] - dur * 0.2) < 0.3, `dragging the end edge only changes the end (${afterEnd[1]} s)`);
+check((await page.locator('#snipInfo').textContent()).includes(afterEnd[1].toFixed(1) + ' s'), 'shows start, end and length under the timeline');
+
 // ---- 8. not a MIDI file ----
 const bogus = path.join(out, 'not-midi.mid'); fs.writeFileSync(bogus, 'hello');
 await page.setInputFiles('#file', bogus);

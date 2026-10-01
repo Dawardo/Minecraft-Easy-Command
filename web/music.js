@@ -204,10 +204,111 @@ function buildSteps(song) {
   return list;
 }
 
+// ---------- snip editor: choose the part of the song on a timeline ----------
+const snip = { drag: null, raf: 0 };
+const SNAP = 0.1;
+function snipRange() {
+  const s = Math.max(0, +$('#start').value || 0);
+  return [s, s + Math.max(1, +$('#length').value || 20)];
+}
+/** Draws the whole song (note density, tune in green), the chosen part, and the playhead. */
+function drawSnip(playhead = null) {
+  const cv = $('#snip');
+  if (!cv || !state.midi) return;
+  const dur = Math.max(1, state.midi.midi.duration);
+  const w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (!w) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  g.fillStyle = col('--panel2'); g.fillRect(0, 0, w, h);
+  // note density per pixel column
+  const bins = Math.max(1, Math.floor(w)), all = new Float32Array(bins), tune = new Float32Array(bins);
+  const lead = state.midi.leadRank[0];
+  for (const t of state.midi.tracks) for (const n of t.notes) {
+    const b = Math.min(bins - 1, Math.floor((n.time / dur) * bins));
+    all[b]++; if (t === lead) tune[b]++;
+  }
+  let max = 1; for (const v of all) max = Math.max(max, v);
+  const barH = v => Math.sqrt(v / max) * (h - 16);
+  for (let i = 0; i < bins; i++) {
+    if (all[i]) { g.fillStyle = col('--muted'); g.globalAlpha = 0.45; g.fillRect(i, h - 14 - barH(all[i]), 1, barH(all[i])); }
+    if (tune[i]) { g.fillStyle = col('--accent'); g.globalAlpha = 0.9; g.fillRect(i, h - 14 - barH(tune[i]), 1, barH(tune[i])); }
+  }
+  g.globalAlpha = 1;
+  // time marks along the bottom
+  const every = [5, 10, 15, 30, 60, 120].find(x => (x / dur) * w >= 46) || 300;
+  g.fillStyle = col('--muted'); g.font = '10px sans-serif'; g.textBaseline = 'bottom';
+  for (let t = 0; t <= dur; t += every) { const x = (t / dur) * w; g.fillRect(x, h - 13, 1, 3); g.fillText(fmtTime(t), x + 2, h); }
+  // chosen part: everything outside it is dimmed
+  const [s, e] = snipRange(), x0 = (s / dur) * w, x1 = Math.min(w, (e / dur) * w);
+  g.fillStyle = col('--bg'); g.globalAlpha = 0.65;
+  g.fillRect(0, 0, x0, h - 14); g.fillRect(x1, 0, w - x1, h - 14);
+  g.globalAlpha = 1; g.fillStyle = col('--accent');
+  g.fillRect(x0 - 1, 0, 3, h - 14); g.fillRect(x1 - 2, 0, 3, h - 14);
+  g.fillRect(x0 - 4, 0, 9, 6); g.fillRect(x1 - 5, 0, 9, 6);
+  if (playhead !== null) { g.fillStyle = col('--text'); g.fillRect((playhead / dur) * w, 0, 2, h - 14); }
+  $('#snipInfo').textContent = `${fmtTime(s)}.${Math.round((s % 1) * 10)} → ${fmtTime(e)}.${Math.round((e % 1) * 10)} · ${(e - s).toFixed(1)} s`;
+}
+/** Writes start/length into the inputs (snapped, kept inside the song and 1..MAX_SECONDS long). */
+function setSnip(s, e) {
+  const dur = state.midi.midi.duration, snap = v => Math.round(v / SNAP) * SNAP;
+  s = Math.max(0, Math.min(snap(s), dur - 1)); e = Math.min(dur, Math.max(snap(e), s + 1));
+  if (e - s > MAX_SECONDS) e = s + MAX_SECONDS;
+  $('#start').value = +s.toFixed(1); $('#length').value = +(e - s).toFixed(1);
+  drawSnip();
+}
+function initSnip() {
+  const cv = $('#snip');
+  const timeAt = ev => { const r = cv.getBoundingClientRect(); return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * state.midi.midi.duration; };
+  cv.addEventListener('pointerdown', ev => {
+    if (!state.midi) return;
+    const r = cv.getBoundingClientRect(), dur = state.midi.midi.duration, [s, e] = snipRange();
+    const px = t => (t / dur) * r.width, x = ev.clientX - r.left, t = timeAt(ev);
+    if (Math.abs(x - px(s)) <= 8) snip.drag = { kind: 'start' };
+    else if (Math.abs(x - px(e)) <= 8) snip.drag = { kind: 'end' };
+    else if (t > s && t < e && e - s < dur - SNAP) snip.drag = { kind: 'move', off: t - s, len: e - s };   // whole song chosen: drag picks a new part
+    else snip.drag = { kind: 'new', anchor: t };
+    cv.setPointerCapture(ev.pointerId);
+  });
+  cv.addEventListener('pointermove', ev => {
+    if (!snip.drag) return;
+    const t = timeAt(ev), [s, e] = snipRange(), d = snip.drag;
+    if (d.kind === 'start') setSnip(Math.min(t, e - 1), e);
+    else if (d.kind === 'end') setSnip(s, t);
+    else if (d.kind === 'move') { const ns = Math.max(0, Math.min(t - d.off, state.midi.midi.duration - d.len)); setSnip(ns, ns + d.len); }
+    else setSnip(Math.min(d.anchor, t), Math.max(d.anchor, t));
+  });
+  const done = () => {
+    if (!snip.drag) return;
+    snip.drag = null;
+    $('#start').dispatchEvent(new Event('change', { bubbles: true }));   // update the result once, on release
+  };
+  cv.addEventListener('pointerup', done);
+  cv.addEventListener('pointercancel', done);
+  $('#snipPlay').onclick = () => {
+    if (!state.settings) return;
+    playOriginal();
+    const t0 = ctx().currentTime + 0.1, { start, length } = state.settings;
+    const tick = () => {
+      const p = ctx().currentTime - t0;
+      if (p > length) { snip.raf = 0; drawSnip(); return; }
+      drawSnip(start + Math.max(0, p)); snip.raf = requestAnimationFrame(tick);
+    };
+    snip.raf = requestAnimationFrame(tick);
+  };
+  $('#snipStop').onclick = stopAll;
+  $('#start').addEventListener('input', () => drawSnip());
+  $('#length').addEventListener('input', () => drawSnip());
+}
+
 // ---------- preview synth ----------
 let actx = null, playing = [];
 function ctx() { return (actx ||= new (window.AudioContext || window.webkitAudioContext)()); }
-function stopAll() { playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = []; }
+function stopAll() {
+  playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = [];
+  if (snip.raf) { cancelAnimationFrame(snip.raf); snip.raf = 0; drawSnip(); }
+}
 function noiseBuffer(ac) {
   if (noiseBuffer.b) return noiseBuffer.b;
   const b = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
@@ -370,7 +471,9 @@ function loadMidi(data, name) {
   $('#start').value = Math.floor(lead.first);
   $('#length').value = Math.min(20, Math.max(1, Math.ceil(midi.duration - Math.floor(lead.first))));
   $('#status').textContent = '';
+  $('#snipBox').classList.remove('hidden');
   convert();
+  drawSnip();
 }
 
 function renderSources() {
@@ -727,9 +830,10 @@ function init() {
     if (e.code === 'Space') { e.preventDefault(); quickCopy(); }
     if (e.code === 'Backspace') { e.preventDefault(); state.pos = Math.max(0, state.pos - 1); renderQuick(); }
   });
-  window.addEventListener('resize', () => state.song && drawRoll());
+  window.addEventListener('resize', () => { if (state.song) drawRoll(); drawSnip(); });
+  initSnip();
 }
 
 // exposed for automated tests
-window.MM = { state, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
+window.MM = { state, setSnip, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
 init();
