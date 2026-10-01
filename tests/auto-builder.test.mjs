@@ -39,6 +39,8 @@ const clips = [...out.matchAll(/type: (.*)/g)].map(m => m[1]);
 check(plan.blocks.slice(0, 5).every(b => clips.includes(b.command.slice(1)) && clips.includes(String(b.delay))), 'pastes each command and its Delay in Ticks');
 check(/right click[\s\S]*move to 520,800[\s\S]*move to 900,300[\s\S]*type: playsound[\s\S]*move to 700,770[\s\S]*type: \d+\s+\[dry\] move to 520,800\s+\[dry\] left click\s+\[dry\] esc \(scan, held\)/.test(out), 'per block: right-click, scroll bar, Command Input, Delay, click off the box, Esc');
 check(/key 191 \(scan\)\s+\[dry\] key 35\s+\[dry\] type: tp @s [^\n]*\s+\[dry\] key 13/.test(out) && !/type: \//.test(out), 'chat: presses /, a throwaway End, types the command without its /, then Enter');
+check(!out.includes('ctrl+65') && (out.match(/\[dry\] key 35\s+\[dry\] key 8\s+\[dry\] type: \d+/g) || []).length === 5 && (out.match(/\[dry\] key 8\b/g) || []).length === 5,
+  'no select-all or extra Backspaces: Command Input is typed straight in, Delay gets End + one Backspace');
 check(/Test run finished: built up to block 5/.test(out), 'test run stops after 5 blocks');
 
 // resume: replaces the next block fresh, continues at block 6

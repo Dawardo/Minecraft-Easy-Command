@@ -56,6 +56,7 @@ label.switch input { width: 18px; height: 18px; accent-color: var(--accent); }
 .live-note { margin-top: 14px; color: var(--accent); }
 .xyz { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 body:not(.slab-mode) .slab-only { display: none !important; }
+body.slab-mode .not-slab { display: none !important; }
 #slabSettings { margin-top: 8px; }
 .pos { font-family: Consolas, monospace; color: var(--blue); white-space: nowrap; }
 .dly { font-family: Consolas, monospace; color: var(--warn); white-space: nowrap; }

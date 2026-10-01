@@ -174,6 +174,14 @@ check(slab.blocks.every(b => b.x >= 100 && b.x <= 103 && b.z >= -20 && b.z <= -1
 const firstStep = r.rows[0].step;
 check(slab.blocks.every((b, i) => b.delay === Math.round((b.time - r.rows[0].time) * 20)), 'Delay in Ticks = time since the first note × 20');
 check(slab.blocks.every((b, i, a) => i === 0 || b.delay >= a[i - 1].delay), 'blocks are placed in time order');
+// slab timing uses single game ticks (0.05 s), not the 0.1 s repeater grid: odd ticks and triplets survive
+const tickCheck = await page.evaluate(() => {
+  const s = { ...MM.state.settings, build: 'slab', mode2: 'off', mode3: 'off', transpose: 0 };
+  const mel = [0, 0.05, 0.15, 1 / 3, 2 / 3, 1].map((t, i) => ({ t, midi: 72 + i, dur: 0.05 }));
+  return MM.slabLayout(MM.buildSong({ mel, bass: [], harmony: [], drums: [] }, s)).blocks.map(b => b.delay).join();
+});
+check(tickCheck === '0,1,3,7,13,20', 'slab: every note on its nearest game tick, triplets included (' + tickCheck + ')');
+check(!(await page.locator('#ticks').isVisible()) && (await page.locator('text=nearest game tick').isVisible()), 'slab mode hides the repeater grid and says it uses game ticks');
 const kinds = slab.levels.map(l => l.kind[0]).join('');
 check(/^(cgc)*(cg)?$/.test(kinds.replace(/cgc/g, 'cgc')) && kinds.startsWith('cg'), `levels go command, glass, command, command, glass… (${kinds})`);
 const cmdYs = new Set(slab.levels.filter(l => l.kind === 'command').map(l => l.y)), glassYs = slab.levels.filter(l => l.kind === 'glass').map(l => l.y);

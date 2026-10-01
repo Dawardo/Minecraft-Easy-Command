@@ -32,7 +32,7 @@ Bedrock syntax: `/playsound <sound> [player] [x y z] [volume] [pitch] [minimumVo
 - **Repeaters**: one redstone line, `button → dust → repeaters → dust → …`. Each step is a column under a piece of dust: the top block is *Impulse · Needs Redstone*, facing down, and extra layers go below it as *Chain · Always Active*, facing down. The page lists the repeaters between steps (each holds 1–4 ticks, 1 tick = 0.1 s).
 - **Chain blocks**: one straight line of command blocks. The first is *Impulse · Needs Redstone*, the rest *Chain · Always Active*, using *Delay in Ticks* (2 game ticks per repeater tick).
 - **Slab (auto-builder)**: made for Realms and huge songs.
-  - **Blocks:** every note is its own *Impulse · Needs Redstone* block with **Delay in Ticks = the note's time** (20 per second, max 99,999 ≈ 83 min).
+  - **Blocks:** every note is its own *Impulse · Needs Redstone* block with **Delay in Ticks = the note's time** (20 per second, max 99,999 ≈ 83 min). Each note lands on its nearest game tick (0.05 s), not the 0.1 s repeater grid, so fast runs and triplets keep their timing.
   - **Layout:** blocks are laid flat in a W×D grid you choose from a corner block, stacked upward as command, glass, command, command, glass…
   - **Start:** `/fill <box> redstone_block replace glass` powers every block on the same tick, and each plays when its delay runs out.
   - **Stop:** `/fill <box> glass replace redstone_block` removes the power, which cancels the notes still waiting. Run Start again to replay.
@@ -64,7 +64,7 @@ Realms can't load your own files, so the builder fills every command block **thr
    **F9** stops right away (even mid-typing) and **F10** pauses/resumes. It also pauses by itself whenever Minecraft isn't the active window. Progress, including the corner you chose, is saved after every block: run it again to **resume**, and the half-done block is re-placed fresh.
 6. When it's done it shows the Start/Stop commands, plus `/gamerule commandblockoutput false` and a `/tickingarea` so the song plays even when nobody is next to it.
 
-It uses only what ships with Windows (PowerShell 5.1+). It's about 3 seconds per block at normal speed.
+It uses only what ships with Windows (PowerShell 5.1+). Each block takes roughly 12 s (pasting, speed 1) to 17 s (pasting, speed 3); typing adds a few seconds.
 
 ## Tests
 

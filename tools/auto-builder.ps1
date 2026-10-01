@@ -98,10 +98,6 @@ namespace Bdm {
       return i;
     }
     public static void Key(int vk, bool up, bool useScan) { Send(KeyInput(vk, up, useScan)); }
-    // Modifier + key in ONE SendInput call: nothing can get in between, and the modifier can't stay held down
-    public static void Chord(int mod, int vk, bool useScan) {
-      Send(new INPUT[] { KeyInput(mod, false, useScan), KeyInput(vk, false, useScan), KeyInput(vk, true, useScan), KeyInput(mod, true, useScan) });
-    }
     // Lets go of both Shifts and both Ctrls, so a stop or crash never leaves one stuck down
     public static void ReleaseModifiers() {
       Send(new INPUT[] { KeyInput(0xA0, true, false), KeyInput(0xA1, true, false), KeyInput(0xA2, true, false), KeyInput(0xA3, true, false) });
@@ -161,7 +157,7 @@ namespace Bdm {
   Add-Type -AssemblyName System.Windows.Forms   # clipboard, for pasting
 }
 
-$VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
+$VK = @{ Slash = 0xBF; End = 0x23; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F10 = 0x79 }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010 }
 
 # Speed = an extra delay (125 / 250 / 500 / 750 ms) added to every wait between actions
@@ -249,12 +245,6 @@ function StepPause([string]$what) {
   Log "  NEXT: $what   (F8 = do it, F9 = stop)" 'Magenta'
   WaitF8
 }
-function WaitForKey([int]$vk) {
-  if ($DryRun) { return }
-  while (Pressed $vk) { Start-Sleep -Milliseconds 30 }          # let go first
-  while (-not (Pressed $vk)) { Start-Sleep -Milliseconds 30 }
-  while (Pressed $vk) { Start-Sleep -Milliseconds 30 }
-}
 $script:answerQueue = New-Object System.Collections.Queue
 if ($Answers) { foreach ($a in ($Answers -split '\|')) { $script:answerQueue.Enqueue($a) } }
 function Prompt([string]$question) {
@@ -270,7 +260,7 @@ function Ask([string]$question, [bool]$default = $true) {
 }
 
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800; beforeFill = 2000; beforeClick = 800 }
+$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800; beforeFill = 2000; beforeClick = 800 }
 
 # Sends a chat command: press "/" (opens chat with the "/" already typed), type the rest, Enter.
 function Chat([string]$command) {
@@ -285,20 +275,15 @@ function Chat([string]$command) {
   Tap $VK.Enter; Wait $T.afterEnter
 }
 
-# Clicks a text box, empties it, waits a moment, then types the text.
-function TypeInto($pt, [string]$text, [int]$backs) {
-  LeftClick $pt; Wait $T.click
-  Combo $VK.A; for ($i = 0; $i -lt $backs; $i++) { Tap $VK.Back }
-  Wait $T.beforeType
+# Clicks a text box, waits a moment, then types (or pastes) the text.
+function TypeInto($pt, [string]$text) {
+  LeftClick $pt; Wait $T.beforeType
   TypeText $text; Wait $T.afterPaste
 }
 
 function Fmt([double]$v) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
-function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))); Wait $T.tp }
+function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))) }   # OpenBlock waits before clicking
 
-# Right after chat closes Minecraft takes the mouse back and ignores the first click (like the first key
-# after chat opens). So: wait, wiggle the mouse a pixel, right-click, and right-click once more (a second
-# right-click on an open command block screen does nothing).
 # Closes (and saves) the command block screen. While a text box is being typed in, Esc only leaves the
 # box, so first click the scroll bar (outside the text boxes), then press Esc the way a keyboard does
 # (scan code, held a moment).
@@ -309,24 +294,30 @@ function CloseBlock($scrollPt) {
   Wait $T.close
 }
 
+# Right after chat closes Minecraft takes the mouse back and ignores the first click (like the first key
+# after chat opens). So: wait (this also lets the teleport land), wiggle the mouse a pixel, right-click, and
+# right-click once more shortly after (a second right-click on an open command block screen does nothing).
 function OpenBlock {
   StepPause 'right-click the block below you'
   Wait $T.beforeClick
   if (-not $DryRun) { [Bdm.Win]::Nudge(1, 0); Start-Sleep -Milliseconds 60; [Bdm.Win]::Nudge(-1, 0); Start-Sleep -Milliseconds 200 }
-  RightClick; Wait 600
+  RightClick; if (-not $DryRun) { Start-Sleep -Milliseconds 300 }
   RightClick; Wait $T.open
 }
 
 function FillBlock($b) {
   # scroll the left panel down so Delay in Ticks shows
   StepPause 'click the bottom of the left scroll bar'
-  LeftClick $cal.scroll; Wait $T.click; LeftClick $cal.scroll; Wait $T.scroll
-  # Command Input (a fresh block is empty; Ctrl+A + Backspace makes sure). Command blocks don't need the
-  # leading '/', and leaving it out means no command suggestions popping up to swallow a key.
+  LeftClick $cal.scroll; if (-not $DryRun) { Start-Sleep -Milliseconds 100 }; LeftClick $cal.scroll; Wait $T.scroll
+  # Command Input: every block is fresh (placed by /fill, or re-placed on resume), so it's empty already.
+  # Command blocks don't need the leading '/', and leaving it out means no suggestions popping up.
   StepPause 'click Command Input and type the command'
-  TypeInto $cal.command ($b.command -replace '^/', '') 1
+  TypeInto $cal.command ($b.command -replace '^/', '')
+  # Delay in Ticks holds "0": click, End, Backspace removes it wherever the click put the cursor
   StepPause 'click Delay in Ticks and type the delay'
-  TypeInto $cal.delay ([string]$b.delay) 7
+  LeftClick $cal.delay; Wait $T.click
+  Tap $VK.End; Tap $VK.Back
+  TypeText ([string]$b.delay); Wait $T.afterPaste
   # close = save
   StepPause 'press Esc to close (and save) the command block'
   CloseBlock $cal.scroll
@@ -545,8 +536,6 @@ if (-not $DryRun) { [Bdm.Win]::StartKillWatch() }   # from here on F9 stops ever
 if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run was killed with Shift or Ctrl held
 
 
-# levels must exist before calibration can open the first block
-$firstLevel = $levels | Where-Object { $_.kind -eq 'command' } | Select-Object -First 1
 $cal = $null
 if (-not $Recalibrate -and (Test-Path $calFile)) {
   $cal = Get-Content $calFile -Raw | ConvertFrom-Json

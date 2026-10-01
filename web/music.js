@@ -70,7 +70,11 @@ function fitToInstrument(notes, inst, transpose) {
 }
 
 function buildSong(tracks, s) {
-  const stepSec = s.ticks * 0.1;
+  // Game ticks per step. Repeaters and chain delays are tied to the repeater grid (1 repeater tick =
+  // 2 game ticks), but in the slab every block has its own Delay in Ticks, so it can use single game
+  // ticks: 0.05 s, half the error of the finest repeater grid.
+  const stepTicks = s.build === 'slab' ? 1 : s.ticks * 2;
+  const stepSec = stepTicks / 20;
   const steps = new Map();
   const stepOf = t => Math.max(0, Math.round(t / stepSec));
   const put = (layer, t, ev) => {
@@ -100,11 +104,11 @@ function buildSong(tracks, s) {
   let prev = null;
   const rows = keys.map(k => {
     const events = steps.get(k).sort((a, b) => a.layer - b.layer);
-    const waitTicks = prev === null ? 0 : (k - prev) * s.ticks;
+    const waitTicks = prev === null ? 0 : (k - prev) * stepTicks / 2;   // repeater ticks (repeater and chain styles)
     prev = k;
     return { step: k, time: k * stepSec, waitTicks, events: events.map(e => ({ ...e, cmd: playsound(e, s) })) };
   });
-  return { rows, stepSec, settings: s };
+  return { rows, stepSec, stepTicks, settings: s };
 }
 
 function playsound(e, s) {
@@ -113,6 +117,9 @@ function playsound(e, s) {
   const tail = s.target === 'all' ? ` ${vol}` : ''; // minimumVolume: heard everywhere at this volume
   return `/playsound ${e.sound} ${target} ~ ~ ~ ${vol} ${fmtPitch(e.pitch)}${tail}`;
 }
+
+/** A step's time: 0.05 s steps (slab) need two decimals, 0.1 s steps one. */
+const fmtStepTime = (t, s) => t.toFixed(s.build === 'slab' ? 2 : 1);
 
 /** Repeater delays (1-4 redstone ticks each) adding up to `ticks`. */
 function repeaters(ticks) {
@@ -132,7 +139,7 @@ const MAX_DELAY = 99999;     // Bedrock command block "Delay in Ticks" limit
 function slabLayout(song) {
   const s = song.settings, { x, y, z, w, d } = s.slab;
   const first = song.rows.length ? song.rows[0].step : 0;
-  const notes = song.rows.flatMap(r => r.events.map(e => ({ cmd: e.cmd, delay: (r.step - first) * s.ticks * 2, time: r.time, layer: e.layer })));
+  const notes = song.rows.flatMap(r => r.events.map(e => ({ cmd: e.cmd, delay: (r.step - first) * song.stepTicks, time: r.time, layer: e.layer })));
   const per = w * d, layers = Math.max(1, Math.ceil(notes.length / per));
   const cmdY = k => y + Math.floor(k / 2) * 3 + (k % 2) * 2;
   const levels = [];
@@ -530,7 +537,7 @@ function renderResult() {
       <div class="row"><h2 style="margin:0">All commands</h2><span class="spacer"></span>
         <button class="small" id="dlTxt">Download as .txt</button></div>
       <div class="table-wrap" style="margin-top:10px"><table class="steps-table"><thead><tr><th>#</th><th>Time</th><th>Wait</th><th>Command block(s)</th></tr></thead>
-      <tbody>${song.rows.map((r, i) => `<tr data-row="${i}"><td>${i + 1}</td><td>${r.time.toFixed(1)}s</td>
+      <tbody>${song.rows.map((r, i) => `<tr data-row="${i}"><td>${i + 1}</td><td>${fmtStepTime(r.time, s)}s</td>
         <td class="wait">${waitText(r.waitTicks, chain, i, s.build)}</td>
         <td>${r.events.map((e, ei) => {
           const st = stepAt[`${i}:${ei}`];
@@ -613,7 +620,7 @@ function renderQuick() {
       `First place repeater${repeaters(it.wait).length > 1 ? 's' : ''}: <b>${repeaters(it.wait).join(' + ')}</b> tick${it.wait > 1 ? 's' : ''}, then dust`;
   }
   q.innerHTML = `
-    <div class="now">Block <b>${p + 1}</b> of ${st.length} · step ${it.row + 1} · ${row.time.toFixed(1)} s
+    <div class="now">Block <b>${p + 1}</b> of ${st.length} · step ${it.row + 1} · ${fmtStepTime(row.time, state.song.settings)} s
       ${row.events.length > 1 ? `· block ${it.ei + 1} of ${row.events.length} in this column` : ''}</div>
     ${before ? `<div class="wait">${before}</div>` : ''}
     <div>${esc(it.how)}</div>

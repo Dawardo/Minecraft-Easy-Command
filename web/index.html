@@ -36,10 +36,11 @@
 
     <div class="card">
       <h3>2. Sound</h3>
-      <label>Speed grid (repeater ticks per step)</label>
-      <div class="seg" id="ticks">
+      <label class="not-slab">Speed grid (repeater ticks per step)</label>
+      <div class="seg not-slab" id="ticks">
         <button data-v="1" class="active">1 tick (0.1 s)</button><button data-v="2">2 ticks (0.2 s)</button>
       </div>
+      <div class="hint slab-only">Timing: every note lands on the nearest game tick (0.05 s), since each slab block has its own Delay in Ticks.</div>
 
       <div class="layer" id="layer1">
         <div class="layer-head"><b>1. Melody</b><span class="onoff">ON</span></div>
