@@ -1,8 +1,11 @@
-# Pushing a version tag (v1.0.0, v1.1.0, ...) publishes a GitHub release with a ready-to-use zip.
+# Publishes a GitHub release with a ready-to-use zip when:
+#   - the VERSION file changes in a push (the release is tagged v<VERSION>), or
+#   - a version tag (v1.0.0, v1.1.0, ...) is pushed.
 name: Release
 on:
   push:
     tags: ['v*']
+    paths: ['VERSION']
 permissions:
   contents: write
 jobs:
@@ -10,9 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pick the version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"; else tag="v$(tr -d ' \r\n' < VERSION)"; fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
       - name: Build the download zip
-        run: git archive --format=zip --prefix=Minecraft-Easy-Command/ -o "Minecraft-Easy-Command-$GITHUB_REF_NAME.zip" HEAD
+        run: git archive --format=zip --prefix=Minecraft-Easy-Command/ -o "Minecraft-Easy-Command-$TAG.zip" HEAD
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "Minecraft-Easy-Command-$GITHUB_REF_NAME.zip" --title "Bedrock Music Maker $GITHUB_REF_NAME" --notes-file .github/release-notes.md
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "Release $TAG already exists: bump VERSION for a new one."; exit 0; fi
+          gh release create "$TAG" "Minecraft-Easy-Command-$TAG.zip" --target "$GITHUB_SHA" --title "Bedrock Music Maker $TAG" --notes-file .github/release-notes.md
