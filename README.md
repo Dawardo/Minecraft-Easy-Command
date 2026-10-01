@@ -45,18 +45,19 @@ Realms can't load your own files, so the builder fills every command block **thr
 1. In the page pick **Slab (auto-builder)**, set the corner block and footprint, and click **Download build plan**.
 2. Double-click **`Start-Auto-Builder.bat`**. It finds the newest `*.slabplan.json` in Downloads (or drag one onto the `.bat`). It then asks:
    - **speed**: use *slow* on a laggy Realm
-   - **where to build**: Enter keeps the plan's corner, or type a new one like `120 64 -35`. Turn on coordinates with `/gamerule showcoordinates true` and use the Position shown where you stand.
+   - **where to build** (always asked): type the corner like `120 64 -35`; `x 0 z 0` isn't allowed. Turn on coordinates with `/gamerule showcoordinates true` and use the Position shown where you stand. (A resumed build keeps its corner.)
+   - **set up the clicks again?** (only if a setup is saved): say yes if clicks landed in the wrong place
    - **which block to start from**: if earlier ones are already built
    - **a test run** (e.g. 10 blocks), with an optional **step-by-step** mode (F8 before every action)
 3. In Minecraft: Creative, flying, operator, near the corner, with the area empty. Click into Minecraft and press **F8**.
 4. **First time only:**
    - **Typing:** chat commands are typed like a player would: press **/** (Minecraft opens chat with the `/` already in it), type the rest of the command key by key, press **Enter**. Command blocks get the command without the `/` (they don't need it).
-   - **Calibration:** the builder opens the first command block. Hover over **Command Input** and press **F8**, then the **left panel** and **F8**. After it scrolls, hover over the **right end of Delay in Ticks** and press **F8**. Redo it with `-Recalibrate` if you change the window size or GUI scale.
+   - **Click setup:** the builder opens the first command block. Click the **bottom of the left scroll bar**, then click **Command Input** (it types the command by itself), then click **Delay in Ticks** (it types 67, waits a second, then 0). If it all worked press **F8** to save, **F9** to redo. Redo it later by answering yes at the start, or with `-Recalibrate`.
 5. Hands off. For every block it:
    - types `/fill` for each new layer and `/tp @s x y+2 z 0 90` into chat, so it's straight above the block looking down
-   - right-clicks, and **checks pixels that the screen really opened** (it retries, and re-teleports if not)
-   - types the command, scrolls down, types Delay in Ticks
-   - presses Esc and checks the screen closed
+   - right-clicks to open the command block
+   - clicks the bottom of the left scroll bar, clicks Command Input and types the command, clicks Delay in Ticks and types the delay
+   - presses Esc to close and save
 
    **F9** pauses/resumes and **F12** stops. It also pauses by itself whenever Minecraft isn't the active window. Progress, including the corner you chose, is saved after every block: run it again to **resume**, and the half-done block is re-placed fresh.
 6. When it's done it shows the Start/Stop commands, plus `/gamerule commandblockoutput false` and a `/tickingarea` so the song plays even when nobody is next to it.

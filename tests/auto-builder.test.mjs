@@ -32,7 +32,7 @@ const tps = chats.filter(c => c.startsWith('/tp @s'));
 check(tps.length === 5 && tps.every((c, i) => c === `/tp @s ${plan.blocks[i].x + 0.5} ${plan.blocks[i].y + 2} ${plan.blocks[i].z + 0.5} 0 90`), 'teleports above each block, looking straight down');
 const clips = [...out.matchAll(/type: (.*)/g)].map(m => m[1]);
 check(plan.blocks.slice(0, 5).every(b => clips.includes(b.command.slice(1)) && clips.includes(String(b.delay))), 'pastes each command and its Delay in Ticks');
-check(/right click[\s\S]*move to[\s\S]*type: playsound[\s\S]*wheel down 12[\s\S]*type: \d+[\s\S]*key 27/.test(out), 'per block: right-click, Command Input, scroll, Delay, Esc');
+check(/right click[\s\S]*move to 520,800[\s\S]*move to 900,300[\s\S]*type: playsound[\s\S]*move to 700,770[\s\S]*type: \d+[\s\S]*key 27/.test(out), 'per block: right-click, scroll bar, Command Input, Delay, Esc');
 check(/key 191 \(scan\)\s+\[dry\] key 35\s+\[dry\] type: tp @s [^\n]*\s+\[dry\] key 13/.test(out) && !/type: \//.test(out), 'chat: presses /, a throwaway End, types the command without its /, then Enter');
 check(/Test run finished: built up to block 5/.test(out), 'test run stops after 5 blocks');
 
@@ -61,7 +61,7 @@ fs.rmSync(prog, { force: true });
 
 // start part-way (earlier blocks already built): no layer refills below it
 const startAt = 30;
-out = ask(`2||${startAt}|2|n|n`);
+out = ask(`2|${plan.corner.x} ${plan.corner.y} ${plan.corner.z}|${startAt}|2|n|n`);
 const firstTp = (out.match(/chat: (\/tp @s [^\n]*)/) || [])[1];
 check(firstTp === `/tp @s ${plan.blocks[startAt - 1].x + 0.5} ${plan.blocks[startAt - 1].y + 2} ${plan.blocks[startAt - 1].z + 0.5} 0 90`, `start at block ${startAt}: goes straight to it`);
 check(!/chat: \/fill .* command_block/.test(out.split(firstTp)[0]) && out.includes(`/setblock ${plan.blocks[startAt - 1].x} ${plan.blocks[startAt - 1].y} ${plan.blocks[startAt - 1].z} command_block`), 'start part-way: doesn\'t refill built layers, re-places that block fresh');

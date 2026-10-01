@@ -5,10 +5,11 @@
 
   For every command block it:
     1. teleports above the block looking straight down     (/tp @s x y z 0 90, typed into chat)
-    2. right-clicks it and checks the screen really opened  (pixel check, retries if not)
-    3. pastes the command into Command Input
-    4. scrolls the left panel down and pastes Delay in Ticks
-    5. presses Esc and checks the screen closed
+    2. right-clicks it to open the command block screen
+    3. clicks the bottom of the left scroll bar, so Delay in Ticks shows
+    4. clicks Command Input and types the command
+    5. clicks Delay in Ticks and types the delay
+    6. presses Esc (closes and saves)
 
   Keys while it runs:  F9 = pause / resume    F12 = stop (progress is saved, run again to resume)
   Chat commands are typed like a player would: press / (opens chat with the /), type the rest, press Enter.
@@ -18,7 +19,7 @@ param(
   [Parameter(Position = 0)][string]$Plan,
   [ValidateSet('fast', 'normal', 'slow', 'veryslow')][string]$Speed = '',
   [int]$Limit = -1,
-  [switch]$Recalibrate,
+  [switch]$Recalibrate,            # show the builder where to click again
   [switch]$Step,                   # step-by-step: press F8 before every action (for finding problems)
   [switch]$DryRun,
   [switch]$Yes,                    # answer "yes" to every question (used by the dry-run test)
@@ -30,11 +31,8 @@ $calFile = Join-Path $here 'calibration.json'
 
 # ---------------------------------------------------------------- Windows input / screen helpers
 if (-not $DryRun) {
-  Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-  Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+  Add-Type -TypeDefinition @'
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Text;
 namespace Bdm {
@@ -45,11 +43,8 @@ namespace Bdm {
     [StructLayout(LayoutKind.Explicit)] public struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
     [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public InputUnion U; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
     [DllImport("user32.dll", SetLastError = true)] static extern uint SendInput(uint n, INPUT[] inputs, int size);
-    [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -57,9 +52,6 @@ namespace Bdm {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
-    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
-    [DllImport("gdi32.dll")] static extern uint GetPixel(IntPtr dc, int x, int y);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
@@ -117,58 +109,10 @@ namespace Bdm {
       i.U.mi.dwFlags = flags; i.U.mi.mouseData = unchecked((uint)data);
       Send(i);
     }
-    public static int[] Pixel(int x, int y) {
-      IntPtr dc = GetDC(IntPtr.Zero);
-      uint c = GetPixel(dc, x, y);
-      ReleaseDC(IntPtr.Zero, dc);
-      return new int[] { (int)(c & 0xFF), (int)((c >> 8) & 0xFF), (int)((c >> 16) & 0xFF) };
-    }
     public static string ForegroundTitle() {
       StringBuilder sb = new StringBuilder(256);
       GetWindowText(GetForegroundWindow(), sb, 256);
       return sb.ToString();
-    }
-    // x, y, width, height of the inside of the window in front (no title bar), in screen pixels
-    public static int[] ClientArea() {
-      IntPtr h = GetForegroundWindow(); RECT r; POINT p = new POINT();
-      GetClientRect(h, out r); ClientToScreen(h, ref p);
-      return new int[] { p.X, p.Y, r.Right - r.Left, r.Bottom - r.Top };
-    }
-    // A box of the screen as 0xRRGGBB values: one screen copy, much faster than GetPixel per pixel
-    public static int[] Shot(int x, int y, int w, int h) {
-      using (Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb)) {
-        using (Graphics g = Graphics.FromImage(bmp)) { g.CopyFromScreen(x, y, 0, 0, new Size(w, h)); }
-        BitmapData d = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-        int[] px = new int[w * h];
-        Marshal.Copy(d.Scan0, px, 0, px.Length);
-        bmp.UnlockBits(d);
-        return px;
-      }
-    }
-    // Pixels in Minecraft's error red (chat color code c, about #FF5555). Tight, so orange command blocks,
-    // brown and pink don't count: strong red, with green and blue lower and about equal.
-    public static int RedCount(int[] px) {
-      int n = 0;
-      foreach (int c in px) {
-        int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-        if (r >= 200 && g >= 40 && g <= 130 && b >= 40 && b <= 130 && r - g > 90 && r - b > 90 && Math.Abs(g - b) < 40) n++;
-      }
-      return n;
-    }
-    // How many pixels clearly differ between two shots of the same box
-    public static int Changed(int[] a, int[] b) {
-      int n = 0;
-      for (int i = 0; i < a.Length && i < b.Length; i++) {
-        int x = a[i], y = b[i];
-        int d = Math.Abs(((x >> 16) & 0xFF) - ((y >> 16) & 0xFF)) + Math.Abs(((x >> 8) & 0xFF) - ((y >> 8) & 0xFF)) + Math.Abs((x & 0xFF) - (y & 0xFF));
-        if (d > 60) n++;
-      }
-      return n;
-    }
-    // Every pixel the same: the screen couldn't be read (black capture), so a check can't tell anything
-    public static bool Blank(int[] px) {
-      for (int i = 1; i < px.Length; i++) { if (px[i] != px[0]) return false; }
-      return true;
     }
   }
 }
@@ -177,7 +121,7 @@ namespace Bdm {
 }
 
 $VK = @{ Slash = 0xBF; End = 0x23; Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
-$M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010; Wheel = 0x0800 }
+$M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010 }
 
 $script:speedMul = 1.0
 function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ([int]($ms * $script:speedMul)) } }
@@ -209,7 +153,6 @@ function TypeText([string]$text) {
 function MoveTo($p) { Act "move to $($p.x),$($p.y)"; if (-not $DryRun) { [void][Bdm.Win]::SetCursorPos($p.x, $p.y); Start-Sleep -Milliseconds 40 } }
 function LeftClick($p) { MoveTo $p; Act 'left click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.LeftDown, 0); Start-Sleep -Milliseconds 40; [Bdm.Win]::Mouse($M.LeftUp, 0) } }
 function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 50; [Bdm.Win]::Mouse($M.RightUp, 0) } }
-function WheelDown([int]$notches) { Act "wheel down $notches"; if (-not $DryRun) { for ($i = 0; $i -lt $notches; $i++) { [Bdm.Win]::Mouse($M.Wheel, -120); Start-Sleep -Milliseconds 25 } } }
 function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::GetAsyncKeyState($vk) -band 0x8000) -ne 0 }
 function Cursor { $p = New-Object Bdm.Win+POINT; [void][Bdm.Win]::GetCursorPos([ref]$p); return @{ x = $p.X; y = $p.Y } }
 function Beep([int]$f = 880) { if (-not $DryRun) { try { [Console]::Beep($f, 120) } catch {} } }
@@ -245,132 +188,51 @@ function Ask([string]$question, [bool]$default = $true) {
   return $a.Trim().ToLower().StartsWith('y')
 }
 
-# ---------------------------------------------------------------- open / closed check (pixels)
-function Sample($points) { if ($DryRun) { return @() }; return @($points | ForEach-Object { , [Bdm.Win]::Pixel($_.x, $_.y) }) }
-function Near($a, $b) { return ([math]::Abs($a[0] - $b[0]) + [math]::Abs($a[1] - $b[1]) + [math]::Abs($a[2] - $b[2])) -le 45 }
-function IsOpen {
-  if ($DryRun) { return $script:dryOpen }
-  $now = Sample $cal.points
-  for ($i = 0; $i -lt $now.Count; $i++) { if (-not (Near $now[$i] $cal.open[$i])) { return $false } }
-  return $true
-}
-function WaitOpen([int]$timeoutMs) {
-  $end = (Get-Date).AddMilliseconds($timeoutMs * $script:speedMul)
-  while ((Get-Date) -lt $end) { if (IsOpen) { return $true }; Start-Sleep -Milliseconds 50 }
-  return (IsOpen)
-}
-function WaitClosed([int]$timeoutMs) {
-  $end = (Get-Date).AddMilliseconds($timeoutMs * $script:speedMul)
-  while ((Get-Date) -lt $end) { if (-not (IsOpen)) { return $true }; Start-Sleep -Milliseconds 50 }
-  return (-not (IsOpen))
-}
-
-# ---------------------------------------------------------------- did the text arrive? (screen checks)
-# Red error text in chat (Minecraft's red, like "Unknown command" or "Syntax error"). Bedrock shows chat on
-# the left, so the left 60% of the window is read. Counted before and after a command, so old lines don't count.
-$script:redMin = 150   # new red pixels that mean a new error line
-function ChatRed {
-  if ($DryRun) { return 0 }
-  $a = [Bdm.Win]::ClientArea()
-  if ($a[2] -lt 10 -or $a[3] -lt 10) { return 0 }
-  return [Bdm.Win]::RedCount([Bdm.Win]::Shot($a[0], $a[1], [int]($a[2] * 0.6), $a[3]))
-}
-# Screen box around a calibrated point, kept inside the Minecraft window: @(x, y, w, h)
-function BoxAround($pt, [int]$rx, [int]$ry) {
-  $a = [Bdm.Win]::ClientArea()
-  $x0 = [int][math]::Max($a[0], $pt.x - $rx); $y0 = [int][math]::Max($a[1], $pt.y - $ry)
-  $x1 = [int][math]::Min($a[0] + $a[2], $pt.x + $rx); $y1 = [int][math]::Min($a[1] + $a[3], $pt.y + $ry)
-  return @($x0, $y0, ($x1 - $x0), ($y1 - $y0))
-}
-function ShotBox($box) {
-  if ($box[2] -le 0 -or $box[3] -le 0) { return $null }
-  return , [Bdm.Win]::Shot($box[0], $box[1], $box[2], $box[3])
-}
-
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; openTimeout = 4000; settle = 300; click = 200; scroll = 350; closeTimeout = 3000 }
+$T = @{ chatOpen = 1000; afterPaste = 250; afterEnter = 600; tp = 500; open = 1200; click = 200; beforeType = 500; scroll = 350; close = 800 }
 
-# Sends a chat command. If Minecraft answers with a red error (letters went missing on the way), it's sent again.
-# -MayFail: a red answer is fine (clearing air that's already air), so don't check.
-function Chat([string]$command, [switch]$MayFail) {
+# Sends a chat command: press "/" (opens chat with the "/" already typed), type the rest, Enter.
+function Chat([string]$command) {
   Log "    chat: $command" 'DarkCyan'
-  for ($try = 1; $try -le 3; $try++) {
-    $red = ChatRed
-    # Press "/" (opens chat with the "/" already typed), type the rest, Enter. Opening chat with T made
-    # the T land in the chat too ("t/tell").
-    StepPause "press / and type: $command"
-    TapScan $VK.Slash; Wait $T.chatOpen
-    # Minecraft eats the first key after chat opens ("/tp" arrived as "/p", "/fill" as "/ill"), so the first
-    # key is a throwaway End (no letter; if it does arrive it just moves to the end of the "/")
-    Tap $VK.End; Wait 300
-    TypeText ($command -replace '^/', ''); Wait $T.afterPaste
-    StepPause 'press Enter'
-    Tap $VK.Enter; Wait $T.afterEnter
-    if ($MayFail -or ((ChatRed) - $red) -lt $script:redMin) { return }
-    Log "    Minecraft answered with a red error (try $try of 3): sending it again" 'Yellow'
-    Wait 1000
-  }
-  Log "  Minecraft keeps answering this with a red error:  $command" 'Red'
-  Log '  Read the chat. If letters are missing, open chat and type it yourself. If it only says nothing needed changing, that''s fine.' 'Red'
-  Log '  Then press F8 to continue, or F12 to stop.' 'Red'
-  Beep 300; Beep 300
-  WaitF8
+  StepPause "press / and type: $command"
+  TapScan $VK.Slash; Wait $T.chatOpen
+  # Minecraft eats the first key after chat opens ("/tp" arrived as "/p", "/fill" as "/ill"), so the first
+  # key is a throwaway End (no letter; if it does arrive it just moves to the end of the "/")
+  Tap $VK.End; Wait 300
+  TypeText ($command -replace '^/', ''); Wait $T.afterPaste
+  StepPause 'press Enter'
+  Tap $VK.Enter; Wait $T.afterEnter
 }
 
-# Clicks a text box, empties it, types the text, and checks on screen that the text showed up in the box.
-# $minChanged: how many pixels must change (a whole command changes thousands, a single digit a few dozen).
-$script:checkBoxes = $true
-function TypeInto($pt, [string]$text, [int]$backs, [int]$minChanged) {
-  for ($try = 1; $try -le 2; $try++) {
-    LeftClick $pt; Wait $T.click
-    Combo $VK.A; for ($i = 0; $i -lt $backs; $i++) { Tap $VK.Back }
-    $box = $null; $before = $null
-    if ($script:checkBoxes -and -not $DryRun) { Start-Sleep -Milliseconds 100; $box = BoxAround $pt 400 60; $before = ShotBox $box }
-    TypeText $text; Wait $T.afterPaste
-    if ($null -eq $before -or [Bdm.Win]::Blank($before)) { return }      # not checking, or the screen can't be read
-    if ([Bdm.Win]::Changed($before, (ShotBox $box)) -ge $minChanged) { return }
-    Log "    the text didn't show up in the box (try $try of 2)" 'Yellow'
-  }
-  Log "  The text still doesn't show up in the box. If it's missing, click the box and type it yourself:  $text" 'Red'
-  Log '  F8 = it''s there now, continue    F9 = it was there all along (stop checking boxes)    F12 = stop' 'Red'
-  Beep 300; Beep 300
-  while ($true) {
-    if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; return }
-    if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; $script:checkBoxes = $false; Log '  OK, not checking the boxes any more.' 'Yellow'; return }
-    if (Pressed $VK.F12) { throw 'STOP' }
-    Start-Sleep -Milliseconds 30
-  }
+# Clicks a text box, empties it, waits a moment, then types the text.
+function TypeInto($pt, [string]$text, [int]$backs) {
+  LeftClick $pt; Wait $T.click
+  Combo $VK.A; for ($i = 0; $i -lt $backs; $i++) { Tap $VK.Back }
+  Wait $T.beforeType
+  TypeText $text; Wait $T.afterPaste
 }
 
 function Fmt([double]$v) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
 function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))); Wait $T.tp }
 
-function OpenBlock($b) {
-  for ($try = 1; $try -le 3; $try++) {
-    if ($DryRun) { $script:dryOpen = $true }
-    StepPause 'right-click the block below you'
-    RightClick
-    if (WaitOpen $T.openTimeout) { Wait $T.settle; return $true }
-    Log "    the command block screen didn't open (try $try of 3)" 'Yellow'
-    if ($try -eq 2) { TpAbove $b }   # maybe the teleport lagged: do it again
-  }
-  return $false
+function OpenBlock {
+  StepPause 'right-click the block below you'
+  RightClick; Wait $T.open
 }
 
 function FillBlock($b) {
+  # scroll the left panel down so Delay in Ticks shows
+  StepPause 'click the bottom of the left scroll bar'
+  LeftClick $cal.scroll; Wait $T.click; LeftClick $cal.scroll; Wait $T.scroll
   # Command Input (a fresh block is empty; Ctrl+A + Backspace makes sure). Command blocks don't need the
   # leading '/', and leaving it out means no command suggestions popping up to swallow a key.
   StepPause 'click Command Input and type the command'
-  TypeInto $cal.command ($b.command -replace '^/', '') 1 150
-  # Delay in Ticks: scroll the left panel to the bottom, then replace the value
-  StepPause 'scroll the left panel down and type Delay in Ticks'
-  MoveTo $cal.panel; WheelDown 12; Wait $T.scroll
-  TypeInto $cal.delay ([string]$b.delay) 7 20
+  TypeInto $cal.command ($b.command -replace '^/', '') 1
+  StepPause 'click Delay in Ticks and type the delay'
+  TypeInto $cal.delay ([string]$b.delay) 7
   # close = save
   StepPause 'press Esc to close (and save) the command block'
-  if ($DryRun) { $script:dryOpen = $false }
-  Tap $VK.Esc
-  if (-not (WaitClosed $T.closeTimeout)) { Tap $VK.Esc; [void](WaitClosed $T.closeTimeout) }
+  Tap $VK.Esc; Wait $T.close
 }
 
 # ---------------------------------------------------------------- pause / stop / focus
@@ -408,38 +270,56 @@ function FindPlan {
   return (Resolve-Path ($p.Trim('"', ' '))).Path
 }
 
-# ---------------------------------------------------------------- calibration
+# ---------------------------------------------------------------- calibration (one time: you click, the builder records)
+function WaitClick {
+  while (Pressed 0x01) { Start-Sleep -Milliseconds 20 }
+  while (-not (Pressed 0x01)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 20 }
+  $pt = Cursor
+  while (Pressed 0x01) { Start-Sleep -Milliseconds 20 }
+  Log "   got $($pt.x),$($pt.y)" 'Green'
+  return $pt
+}
 function Calibrate($firstBlock) {
   Log ''
-  Log '=== One-time calibration ===' 'Cyan'
+  Log '=== One-time setup: show the builder where to click ===' 'Cyan'
   Log 'Tip: run Minecraft in a window (not full screen) next to this one so you can read these steps.'
-  Log 'The builder will now open the first command block for you.'
-  TpAbove $firstBlock
-  RightClick; Start-Sleep -Milliseconds ([int](1500 * $script:speedMul))
-  Log ''
-  Log '1) Is the Command Block screen open? If not, right-click the block below you yourself.' 'White'
-  Log '   Hover the mouse over the MIDDLE of the "Command Input" box and press F8.' 'White'
-  Beep; WaitForKey $VK.F8; $command = Cursor; Log "   got $($command.x),$($command.y)" 'Green'
-  Log '2) Hover over the LEFT panel (for example on the "Block Type" button) and press F8.' 'White'
-  Beep; WaitForKey $VK.F8; $panel = Cursor; Log "   got $($panel.x),$($panel.y)" 'Green'
-  $mid = @{ x = [int](($command.x + $panel.x) / 2); y = [int](($command.y + $panel.y) / 2) }
-  $points = @($command, $panel, $mid)
-  $open = Sample $points
-  MoveTo $panel; WheelDown 12; Start-Sleep -Milliseconds 500
-  Log '3) The left panel scrolled down. Hover over the RIGHT end of the "Delay in Ticks" box and press F8.' 'White'
-  Beep; WaitForKey $VK.F8; $delay = Cursor; Log "   got $($delay.x),$($delay.y)" 'Green'
-  Log '   Closing the screen to learn what "closed" looks like...'
-  Tap $VK.Esc; Start-Sleep -Milliseconds 1200
-  $closed = Sample $points
-  $differs = 0
-  for ($i = 0; $i -lt 3; $i++) { if (-not (Near $open[$i] $closed[$i])) { $differs++ } }
-  if ($differs -eq 0) { throw 'Calibration failed: the screen looks the same open and closed. Run again with -Recalibrate.' }
-  $c = @{
-    screen = @{ w = [Bdm.Win]::GetSystemMetrics(0); h = [Bdm.Win]::GetSystemMetrics(1) }
-    command = $command; panel = $panel; delay = $delay; points = $points; open = $open
+  while ($true) {
+    Log 'The builder opens the first command block for you...'
+    TpAbove $firstBlock
+    RightClick; Start-Sleep -Milliseconds ([int](1500 * $script:speedMul))
+    Log ''
+    Log '0) The command block screen should be open. If not, right-click the block below you yourself.' 'White'
+    Log '1) Click the BOTTOM of the scroll bar on the LEFT side (the left panel scrolls down).' 'White'
+    Beep; $scroll = WaitClick
+    Log '2) Click inside the "Command Input" box. The builder then types the command by itself.' 'White'
+    Beep; $command = WaitClick
+    Start-Sleep -Milliseconds 600
+    TypeText ($firstBlock.command -replace '^/', '')
+    Log '3) Click inside the "Delay in Ticks" box. The builder types 67, waits 1 second, then changes it to 0.' 'White'
+    Beep; $delay = WaitClick
+    Start-Sleep -Milliseconds 600
+    Combo $VK.A; for ($i = 0; $i -lt 7; $i++) { Tap $VK.Back }
+    TypeText '67'; Start-Sleep -Milliseconds 1000
+    Combo $VK.A; for ($i = 0; $i -lt 7; $i++) { Tap $VK.Back }
+    TypeText '0'
+    Log 'Did the command show up in Command Input, and Delay in Ticks show 67 and then 0?' 'Yellow'
+    Log '   F8 = YES, save it    F9 = NO, do it again' 'Yellow'
+    Beep
+    $ok = $false
+    while ($true) {
+      if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; $ok = $true; break }
+      if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; break }
+      if (Pressed $VK.F12) { throw 'STOP' }
+      Start-Sleep -Milliseconds 30
+    }
+    Tap $VK.Esc; Start-Sleep -Milliseconds 800
+    if ($ok) { break }
   }
-  $c | ConvertTo-Json -Depth 5 | Set-Content -Path $calFile -Encoding UTF8
-  Log 'Calibration saved. Keep the same window size and GUI scale from now on.' 'Green'
+  @{ scroll = $scroll; command = $command; delay = $delay } | ConvertTo-Json -Depth 5 | Set-Content -Path $calFile -Encoding UTF8
+  Log 'Saved. Keep the same window size and GUI scale from now on (or say yes to "set up the clicks again" at the start).' 'Green'
+  # the test typing went into the first block: put a fresh one back for the real build
+  Chat ("/setblock {0} {1} {2} air" -f $firstBlock.x, $firstBlock.y, $firstBlock.z)
+  Chat ("/setblock {0} {1} {2} command_block" -f $firstBlock.x, $firstBlock.y, $firstBlock.z)
   return (Get-Content $calFile -Raw | ConvertFrom-Json)
 }
 
@@ -508,16 +388,19 @@ if ($resuming) {
 } elseif (-not $Yes) {
   # where to build
   Log ''
-  Log ("Where should the song go? The plan's corner is {0} {1} {2} (the first command block)." -f $p.corner.x, $p.corner.y, $p.corner.z) 'White'
-  Log '  Tip: to build where you stand, turn on coordinates (chat: /gamerule showcoordinates true),'
-  Log '  stand on the ground at the corner you want and type the "Position" numbers shown.'
-  $c = Prompt 'Press Enter to keep it, or type a new corner like  120 64 -35'
-  $nums = @([regex]::Matches($c, '-?\d+') | ForEach-Object { [int]$_.Value })
-  if ($nums.Count -ge 3) {
-    $prog.offset = @(($nums[0] - [int]$p.corner.x), ($nums[1] - [int]$p.corner.y), ($nums[2] - [int]$p.corner.z))
-    ShiftPlan $prog.offset[0] $prog.offset[1] $prog.offset[2]
-    Log ("Building at {0} {1} {2}." -f $nums[0], $nums[1], $nums[2]) 'Green'
+  Log 'Where should the song go? This is the corner of the build (the first command block).' 'White'
+  Log '  Tip: turn on coordinates (chat: /gamerule showcoordinates true), stand where you want it'
+  Log '  and type the "Position" numbers shown. x 0 z 0 is not allowed.'
+  while ($true) {
+    $c = Prompt 'Corner to build at (x y z), like  120 64 -35'
+    $nums = @([regex]::Matches($c, '-?\d+') | ForEach-Object { [int]$_.Value })
+    if ($nums.Count -lt 3) { Log '  Type three numbers: x y z.' 'Yellow'; continue }
+    if ($nums[0] -eq 0 -and $nums[2] -eq 0) { Log '  x 0 z 0 is not allowed: pick another spot.' 'Yellow'; continue }
+    break
   }
+  $prog.offset = @(($nums[0] - [int]$p.corner.x), ($nums[1] - [int]$p.corner.y), ($nums[2] - [int]$p.corner.z))
+  ShiftPlan $prog.offset[0] $prog.offset[1] $prog.offset[2]
+  Log ("Building at {0} {1} {2}." -f $nums[0], $nums[1], $nums[2]) 'Green'
   # which block to start from
   $sb = Prompt "Start at block 1? Press Enter, or type a block number (1-$($blocks.Count)) if earlier ones are already built"
   if ($sb.Trim() -match '^\d+$' -and [int]$sb.Trim() -gt 1 -and [int]$sb.Trim() -le $blocks.Count) {
@@ -537,6 +420,9 @@ if ($Limit -lt 0 -and -not $Yes) {
 if (-not $Step -and -not $Yes -and $Limit -gt 0 -and $Limit -le 20) {
   if (Ask 'Step-by-step (press F8 before every action, to see exactly what happens)?' $false) { $Step = $true }
 }
+if (-not $Recalibrate -and -not $Yes -and -not $DryRun -and (Test-Path $calFile)) {
+  if (Ask 'Set up the clicks again (only if clicks landed in the wrong place last time)?' $false) { $Recalibrate = $true }
+}
 $stopAt = $blocks.Count
 if ($Limit -gt 0) { $stopAt = [math]::Min($blocks.Count, $prog.next + $Limit) }
 
@@ -552,7 +438,7 @@ if (-not $DryRun) { [Bdm.Win]::ReleaseModifiers() }   # in case an earlier run w
 
 $fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)
 if ($fresh -and $p.clear -and (Ask 'Clear the build space first (fills the box with air)? Only say yes if nothing there matters.' $false)) {
-  foreach ($c in @($p.clear)) { Chat $c -MayFail }
+  foreach ($c in @($p.clear)) { Chat $c }
 }
 
 # levels must exist before calibration can open the first block
@@ -560,7 +446,7 @@ $firstLevel = $levels | Where-Object { $_.kind -eq 'command' } | Select-Object -
 $cal = $null
 if (-not $Recalibrate -and (Test-Path $calFile)) {
   $cal = Get-Content $calFile -Raw | ConvertFrom-Json
-  if (-not $DryRun -and ($cal.screen.w -ne [Bdm.Win]::GetSystemMetrics(0) -or $cal.screen.h -ne [Bdm.Win]::GetSystemMetrics(1))) { Log 'Screen size changed since calibration: calibrating again.' 'Yellow'; $cal = $null }
+  if (-not $cal.scroll) { $cal = $null }   # from the old setup: do the new one
 }
 
 $startTime = Get-Date
@@ -576,7 +462,7 @@ try {
     }
     if ($lv.kind -ne 'command') { continue }
     if (-not $cal) {
-      if ($DryRun) { $cal = @{ command = @{ x = 900; y = 300 }; panel = @{ x = 500; y = 450 }; delay = @{ x = 700; y = 770 }; points = @(); open = @() } }
+      if ($DryRun) { $cal = @{ scroll = @{ x = 520; y = 800 }; command = @{ x = 900; y = 300 }; delay = @{ x = 700; y = 770 } } }
       else { $cal = Calibrate $blocks[$prog.next] }
     }
     for ($i = $prog.next; $i -lt $stopAt; $i++) {
@@ -585,16 +471,11 @@ try {
       CheckKeys; EnsureMinecraft
       if ($justResumed) {
         # after a stop the block might be half filled in: replace it with a fresh one
-        Chat ("/setblock {0} {1} {2} air" -f $b.x, $b.y, $b.z) -MayFail; Chat ("/setblock {0} {1} {2} command_block" -f $b.x, $b.y, $b.z)
+        Chat ("/setblock {0} {1} {2} air" -f $b.x, $b.y, $b.z); Chat ("/setblock {0} {1} {2} command_block" -f $b.x, $b.y, $b.z)
         $justResumed = $false
       }
       TpAbove $b
-      if (-not (OpenBlock $b)) {
-        Log "  Block $($i + 1) at $($b.x) $($b.y) $($b.z) won't open. Fix it by hand if needed (right-click it), close it, then press F8 to continue or F12 to stop." 'Red'
-        Beep 300; Beep 300
-        WaitF8
-        if (-not (OpenBlock $b)) { throw "Block $($i + 1) still won't open." }
-      }
+      OpenBlock
       FillBlock $b
       $prog.next = $i + 1; SaveProgress
       $builtThisRun++
