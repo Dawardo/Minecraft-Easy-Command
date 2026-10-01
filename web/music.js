@@ -1,14 +1,12 @@
 /* Bedrock Music Maker
- * MP3 -> Minecraft BEDROCK Edition command block /playsound commands.
+ * MIDI -> Minecraft BEDROCK Edition command block /playsound commands.
  *   /playsound <sound> [player] [x y z] [volume] [pitch] [minimumVolume]
  * Note block sounds play two octaves: pitch 0.5 .. 2.0 around the instrument's centre note.
- * Everything runs in the browser; no dependencies.
+ * Runs in the browser; MIDI parsing by @tonejs/midi (web/vendor/vendor.js).
  */
 'use strict';
 
-const SR = 22050;          // analysis sample rate
-const HOP_SEC = 0.025;     // analysis frame step
-const MAX_SECONDS = 180;
+const MAX_SECONDS = 300;
 
 // Bedrock note sounds. center = MIDI note played at pitch 1.0 (note block range is center ±12).
 const INSTRUMENTS = {
@@ -29,18 +27,12 @@ const INSTRUMENTS = {
 const DRUMS = { kick: 'note.bd', snare: 'note.snare', hat: 'note.hat' };
 const LAYER_COLORS = ['#5dbb63', '#5a9be5', '#e0b341'];
 
-// Detail presets
-const DETAIL = {
-  1: { minMel: 0.2, voice: 0.12, unvoiced: 0.30, aiOnset: 0.7, prom: 1.6, onsetK: 2.2, minBass: 0.3, drumK: 2.6 },
-  2: { minMel: 0.15, voice: 0.08, unvoiced: 0.26, aiOnset: 0.65, prom: 1.4, onsetK: 1.8, minBass: 0.2, drumK: 2.2 },
-  3: { minMel: 0.1, voice: 0.05, unvoiced: 0.2, aiOnset: 0.55, prom: 1.25, onsetK: 1.5, minBass: 0.15, drumK: 1.8 },
-};
-
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const midiToHz = m => 440 * Math.pow(2, (m - 69) / 12);
+const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const noteName = m => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 const fmtPitch = p => (Math.round(p * 10000) / 10000).toString();
@@ -56,492 +48,6 @@ async function copyText(text) {
     try { document.execCommand('copy'); } catch { /* ignore */ }
     ta.remove();
   }
-}
-
-// ---------- FFT ----------
-const fftCache = {};
-function fftTables(n) {
-  if (fftCache[n]) return fftCache[n];
-  const rev = new Uint32Array(n);
-  const bits = Math.log2(n);
-  for (let i = 0; i < n; i++) { let r = 0; for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b); rev[i] = r; }
-  const cos = new Float64Array(n / 2), sin = new Float64Array(n / 2);
-  for (let i = 0; i < n / 2; i++) { cos[i] = Math.cos(-2 * Math.PI * i / n); sin[i] = Math.sin(-2 * Math.PI * i / n); }
-  const win = new Float64Array(n);
-  for (let i = 0; i < n; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / n);
-  return (fftCache[n] = { rev, cos, sin, win, re: new Float64Array(n), im: new Float64Array(n) });
-}
-/** FFT of a Hann-windowed frame centred on sample `center`; result stays in fftTables(n).re/.im. */
-function fftFrame(x, center, n) {
-  const t = fftTables(n);
-  const { re, im, rev, win } = t;
-  const start = center - n / 2;
-  for (let i = 0; i < n; i++) {
-    const j = start + i;
-    re[rev[i]] = (j >= 0 && j < x.length ? x[j] : 0) * win[i];
-    im[rev[i]] = 0;
-  }
-  fftInPlace(re, im, n, 1);
-  return t;
-}
-/** Iterative radix-2 FFT on bit-reversed input. dir = 1 forward, -1 inverse (unscaled). */
-function fftInPlace(re, im, n, dir) {
-  const t = fftTables(n);
-  for (let size = 2; size <= n; size <<= 1) {
-    const half = size >> 1, step = n / size;
-    for (let i = 0; i < n; i += size) {
-      for (let k = 0; k < half; k++) {
-        const c = t.cos[k * step], s = dir * t.sin[k * step];
-        const a = i + k, b = a + half;
-        const tr = re[b] * c - im[b] * s, ti = re[b] * s + im[b] * c;
-        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
-      }
-    }
-  }
-}
-/** Magnitude spectrum of a Hann-windowed frame centred on sample `center`. */
-function spectrum(x, center, n) {
-  const { re, im } = fftFrame(x, center, n);
-  const out = new Float32Array(n / 2 + 1);
-  for (let k = 0; k <= n / 2; k++) out[k] = Math.hypot(re[k], im[k]);
-  return out;
-}
-/**
- * Stereo frame -> { mix, center } magnitude spectra. `center` keeps what is panned to the middle
- * (usually the lead vocal) and fades out instruments panned left/right. For mono files center == mix.
- */
-function stereoSpectra(L, R, center, n) {
-  const t = fftFrame(L, center, n);
-  const lr = Float64Array.from(t.re.subarray(0, n / 2 + 1)), li = Float64Array.from(t.im.subarray(0, n / 2 + 1));
-  if (L === R) { const m = new Float32Array(n / 2 + 1); for (let k = 0; k <= n / 2; k++) m[k] = Math.hypot(lr[k], li[k]); return { mix: m, center: m }; }
-  fftFrame(R, center, n);
-  const mix = new Float32Array(n / 2 + 1), ctr = new Float32Array(n / 2 + 1);
-  for (let k = 0; k <= n / 2; k++) {
-    const rr = t.re[k], ri = t.im[k];
-    const mag = Math.hypot(lr[k] + rr, li[k] + ri) / 2;
-    const pl = lr[k] * lr[k] + li[k] * li[k], pr = rr * rr + ri * ri;
-    const sim = pl + pr > 1e-12 ? Math.max(0, (2 * (lr[k] * rr + li[k] * ri)) / (pl + pr)) : 0;
-    mix[k] = mag;
-    ctr[k] = mag * sim * sim;
-  }
-  return { mix, center: ctr };
-}
-
-// ---------- pitch salience ----------
-function peakAt(A, df, f) {
-  const k = f / df;
-  if (k >= A.length - 1) return 0;
-  const lo = Math.max(1, Math.floor(k * 0.9715)), hi = Math.min(A.length - 1, Math.ceil(k * 1.0293)); // ±half semitone
-  let m = 0;
-  for (let i = lo; i <= hi; i++) if (A[i] > m) m = A[i];
-  return m;
-}
-/** Harmonic sum, minus energy at half-harmonics (punishes picking an octave too low). */
-function salience(A, df, m, H, tune = 0) {
-  const f0 = midiToHz(m + tune);
-  let s = 0, pen = 0, w = 1;
-  for (let h = 1; h <= H; h++) {
-    s += w * peakAt(A, df, h * f0);
-    pen += w * peakAt(A, df, (h - 0.5) * f0);
-    w *= 0.8;
-  }
-  return s - 0.6 * pen;
-}
-function bandEnergy(A, df, f1, f2) {
-  let e = 0;
-  for (let k = Math.max(1, Math.floor(f1 / df)); k <= Math.min(A.length - 1, Math.ceil(f2 / df)); k++) e += A[k] * A[k];
-  return e;
-}
-/** Spectral flatness (0 = pure tones, 1 = white noise) between f1 and f2. */
-function flatness(A, df, f1, f2) {
-  let lg = 0, ar = 0, n = 0;
-  for (let k = Math.floor(f1 / df); k <= Math.min(A.length - 1, Math.ceil(f2 / df)); k++) {
-    const v = A[k] * A[k] + 1e-12; lg += Math.log(v); ar += v; n++;
-  }
-  return n ? Math.exp(lg / n) / (ar / n) : 0;
-}
-function whiten(A, radius) {
-  const n = A.length, pre = new Float64Array(n + 1), out = new Float32Array(n);
-  for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + A[i];
-  for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - radius), hi = Math.min(n, i + radius + 1);
-    out[i] = A[i] / Math.sqrt((pre[hi] - pre[lo]) / (hi - lo) + 1e-9);
-  }
-  return out;
-}
-function percentile(arr, p) {
-  const a = Array.from(arr).sort((x, y) => x - y);
-  return a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))] : 0;
-}
-/** Peak picking with an adaptive threshold (local mean + k * local std). */
-function pickOnsets(flux, k, radius, floor) {
-  const out = new Uint8Array(flux.length);
-  for (let i = 1; i < flux.length - 1; i++) {
-    if (flux[i] < flux[i - 1] || flux[i] < flux[i + 1] || flux[i] <= floor) continue;
-    let s = 0, s2 = 0, c = 0;
-    for (let j = Math.max(0, i - radius); j <= Math.min(flux.length - 1, i + radius); j++) { s += flux[j]; s2 += flux[j] * flux[j]; c++; }
-    const mean = s / c, sd = Math.sqrt(Math.max(0, s2 / c - mean * mean));
-    if (flux[i] > mean + k * sd) out[i] = 1;
-  }
-  return out;
-}
-
-// ---------- AI transcription (Spotify Basic Pitch, runs locally) ----------
-let bpModel = null;
-/**
- * A "vocal focus" version of the song: keeps sound panned to the centre (STFT mask on the mid channel).
- * Mono songs come back unchanged.
- */
-function centerSignal(L, R) {
-  if (!R || R === L) return L;
-  const N = 2048, H = N / 4, out = new Float32Array(L.length);
-  const win = new Float64Array(N);
-  for (let i = 0; i < N; i++) win[i] = Math.sqrt(0.5 - 0.5 * Math.cos(2 * Math.PI * i / N));
-  const t = fftTables(N);
-  const fwd = (x, c, re, im) => {
-    for (let i = 0; i < N; i++) { const j = c - N / 2 + i; re[t.rev[i]] = (j >= 0 && j < x.length ? x[j] : 0) * win[i]; im[t.rev[i]] = 0; }
-    fftInPlace(re, im, N, 1);
-  };
-  const lr = new Float64Array(N), li = new Float64Array(N), rr = new Float64Array(N), ri = new Float64Array(N);
-  for (let c = 0; c < L.length + N; c += H) {
-    fwd(L, c, lr, li); fwd(R, c, rr, ri);
-    const mr = new Float64Array(N), mi = new Float64Array(N);
-    for (let k = 0; k < N; k++) {
-      const pl = lr[k] * lr[k] + li[k] * li[k], pr = rr[k] * rr[k] + ri[k] * ri[k];
-      const sim = pl + pr > 1e-12 ? Math.max(0, (2 * (lr[k] * rr[k] + li[k] * ri[k])) / (pl + pr)) : 0;
-      const g = sim * sim / 2;
-      mr[t.rev[k]] = (lr[k] + rr[k]) * g; mi[t.rev[k]] = (li[k] + ri[k]) * g;
-    }
-    fftInPlace(mr, mi, N, -1);
-    for (let i = 0; i < N; i++) { const j = c - N / 2 + i; if (j >= 0 && j < out.length) out[j] += (mr[i] / N) * win[i] / 2; }
-  }
-  return out;
-}
-/** Runs Basic Pitch; returns per-model-frame note probabilities (frames) and onset probabilities. */
-async function transcribe(samples, onProgress) {
-  if (!window.BasicPitchLib) throw new Error('AI engine files are missing (web/vendor)');
-  bpModel ||= new window.BasicPitchLib.BasicPitch('vendor/basic-pitch/model.json');
-  const frames = [], onsets = [];
-  await bpModel.evaluateModel(samples, (f, o) => { frames.push(...f); onsets.push(...o); }, onProgress);
-  return { frames, onsets };
-}
-/** Re-pitch by `semitones` (plays slightly slower/faster), so an out-of-tune recording lands on real notes. */
-function repitch(x, semitones) {
-  const r = Math.pow(2, semitones / 12);
-  if (Math.abs(semitones) < 0.03) return { y: x, r: 1 };
-  const y = new Float32Array(Math.floor(x.length / r));
-  for (let i = 0; i < y.length; i++) {
-    const p = i * r, j = Math.floor(p), f = p - j;
-    y[i] = (x[j] || 0) * (1 - f) + (x[j + 1] || 0) * f;
-  }
-  return { y, r };
-}
-/** Model output (86 fps, 88 keys from MIDI 21) -> our analysis grid, indexed by MIDI note. `r`: repitch ratio. */
-function toGrid(rows, nF, r = 1) {
-  const fps = SR / 256, out = [];
-  for (let i = 0; i < nF; i++) {
-    const a = Math.floor(((i - 0.5) * HOP_SEC / r) * fps), b = Math.ceil(((i + 0.5) * HOP_SEC / r) * fps);
-    const g = new Float32Array(128);
-    for (let f = Math.max(0, a); f <= Math.min(rows.length - 1, b); f++) {
-      const r = rows[f];
-      for (let k = 0; k < 88; k++) if (r[k] > g[k + 21]) g[k + 21] = r[k];
-    }
-    out.push(g);
-  }
-  return out;
-}
-
-// ---------- analysis ----------
-const MEL_LO = 45, MEL_HI = 88, BASS_LO = 28, BASS_HI = 55;
-const MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]; // Krumhansl key profiles
-const MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
-
-/** How far (in semitones, -0.5..0.5) the recording is from A=440 tuning. */
-function estimateTuning(L, R, hop, nF) {
-  const N = 4096, df = SR / N;
-  let c = 0, s = 0;
-  for (let i = 0; i < nF; i += 6) {
-    const { mix } = stereoSpectra(L, R, i * hop, N);
-    let mx = 0;
-    for (let k = 1; k < mix.length; k++) if (mix[k] > mx) mx = mix[k];
-    for (let k = Math.ceil(100 / df); k < 2000 / df; k++) {
-      const a = mix[k - 1], b = mix[k], d = mix[k + 1];
-      if (b < 0.1 * mx || b < a || b < d) continue;
-      const off = 0.5 * (a - d) / (a - 2 * b + d || 1e-9);          // parabolic peak interpolation
-      const midi = 69 + 12 * Math.log2(((k + off) * df) / 440);
-      const dev = midi - Math.round(midi);
-      c += b * Math.cos(2 * Math.PI * dev); s += b * Math.sin(2 * Math.PI * dev);
-    }
-  }
-  return c || s ? Math.atan2(s, c) / (2 * Math.PI) : 0;
-}
-
-/** Krumhansl-Schmuckler key finding on a 12-bin chroma vector. */
-function detectKey(chroma) {
-  const corr = (prof, root) => {
-    const xs = prof.map((_, i) => prof[i]), ys = chroma.map((_, i) => chroma[(i + root) % 12]);
-    const mx = xs.reduce((a, b) => a + b) / 12, my = ys.reduce((a, b) => a + b) / 12;
-    let num = 0, dx = 0, dy = 0;
-    for (let i = 0; i < 12; i++) { num += (xs[i] - mx) * (ys[i] - my); dx += (xs[i] - mx) ** 2; dy += (ys[i] - my) ** 2; }
-    return num / Math.sqrt(dx * dy || 1);
-  };
-  let best = { root: 0, minor: false, r: -2 };
-  for (let root = 0; root < 12; root++) {
-    for (const minor of [false, true]) {
-      const r = corr(minor ? MINOR : MAJOR, root);
-      if (r > best.r) best = { root, minor, r };
-    }
-  }
-  const steps = best.minor ? [0, 2, 3, 5, 7, 8, 10, 11] : [0, 2, 4, 5, 7, 9, 11]; // minor also allows the raised 7th
-  best.scale = new Set(steps.map(x => (x + best.root) % 12));
-  best.name = NOTE_NAMES[best.root] + (best.minor ? ' minor' : ' major');
-  return best;
-}
-
-/**
- * Best continuous pitch path through the song (Viterbi). Jumping far or switching on/off costs a little,
- * so the line follows the singer instead of hopping onto guitar chord notes.
- */
-function trackMelody(sal, voicedness, lo, hi, D) {
-  const nF = sal.length, K = hi - lo + 1, U = K; // state U = silence
-  const jump = 0.06, toggle = 0.12, cap = 12;
-  let prev = new Float64Array(K + 1), cur = new Float64Array(K + 1);
-  const back = new Array(nF);
-  for (let i = 0; i < nF; i++) {
-    const bk = new Int16Array(K + 1);
-    const em = k => (k === U ? D.unvoiced : Math.min(1.5, sal[i][lo + k]) * voicedness[i]);
-    if (i === 0) { for (let k = 0; k <= K; k++) cur[k] = em(k); back[0] = bk; [prev, cur] = [cur, prev]; continue; }
-    // best previous voiced state, to make "near" transitions cheap to compute
-    for (let k = 0; k <= K; k++) {
-      let best = -Infinity, arg = 0;
-      if (k === U) {
-        best = prev[U]; arg = U;
-        for (let j = 0; j < K; j++) if (prev[j] - toggle > best) { best = prev[j] - toggle; arg = j; }
-      } else {
-        best = prev[U] - toggle; arg = U;
-        for (let j = 0; j < K; j++) { const v = prev[j] - jump * Math.min(cap, Math.abs(j - k)); if (v > best) { best = v; arg = j; } }
-      }
-      cur[k] = best + em(k); bk[k] = arg;
-    }
-    back[i] = bk; [prev, cur] = [cur, prev];
-  }
-  let k = 0;
-  for (let j = 1; j <= K; j++) if (prev[j] > prev[k]) k = j;
-  const path = new Int16Array(nF);
-  for (let i = nF - 1; i >= 0; i--) { path[i] = k === U ? -1 : lo + k; k = back[i][k]; }
-  return path;
-}
-
-/**
- * Turns stereo samples (at SR) into note events per layer.
- * Returns { mel, bass, harmony, drums, key, tuning } with times in seconds.
- */
-function analyze(L, R, opts) {
-  R = R || L;
-  const ai = opts.ai || null; // { mel: [Float32Array(128)] per frame } from Basic Pitch
-  const D = DETAIL[opts.detail];
-  const hop = Math.round(SR * HOP_SEC);
-  const nF = Math.max(1, Math.floor(L.length / hop));
-  const N1 = 4096, N2 = 8192, N3 = 1024;
-  const df1 = SR / N1, df2 = SR / N2, df3 = SR / N3;
-  const tune = estimateTuning(L, R, hop, nF);
-  const melSal = [], mixSal = [], ctrE = new Float32Array(nF);
-  const bassBest = new Int16Array(nF).fill(-1), bassProm = new Float32Array(nF), bassE = new Float32Array(nF);
-  const drumBands = [[40, 120], [1500, 5000], [7000, 10500]];
-  const drumE = drumBands.map(() => new Float32Array(nF));
-  const ctrFlux = new Float32Array(nF), lowFlux = new Float32Array(nF), flat = new Float32Array(nF);
-  const chroma = new Array(12).fill(0);
-  let prevShort = null, prevCtr = null;
-  const mono = L === R ? L : Float32Array.from(L, (v, i) => (v + R[i]) / 2);
-
-  for (let i = 0; i < nF; i++) {
-    const c = i * hop;
-    // bass first: its pitch is kept out of the melody
-    const B = spectrum(mono, c, N2);
-    bassE[i] = bandEnergy(B, df2, 30, 260);
-    let bb = -1, bs = 0, bsum = 0, bcnt = 0;
-    for (let m = BASS_LO; m <= BASS_HI; m++) {
-      const v = salience(B, df2, m, 5, tune);
-      if (v > 0) { bsum += v; bcnt++; }
-      if (v > bs) { bs = v; bb = m; }
-    }
-    bassBest[i] = bb; bassProm[i] = bcnt ? bs / (bsum / bcnt) : 0;
-    const bassPc = bassProm[i] > 1.3 ? bb : -100;
-
-    // short window: onset timing (centre channel for the tune) + drums (full mix)
-    const SS = stereoSpectra(L, R, c, N3);
-    const S = SS.mix;
-    const sl = new Float32Array(S.length), cl = new Float32Array(S.length);
-    let lf = 0, cf = 0;
-    for (let k = 1; k < Math.ceil(5000 / df3); k++) {
-      sl[k] = Math.log1p(S[k] * 10); cl[k] = Math.log1p(SS.center[k] * 10);
-      if (prevShort && k <= 300 / df3) lf += Math.max(0, sl[k] - prevShort[k]);
-      if (prevCtr && k >= 150 / df3) cf += Math.max(0, cl[k] - prevCtr[k]);
-    }
-    ctrFlux[i] = cf; lowFlux[i] = lf; prevShort = sl; prevCtr = cl;
-    flat[i] = flatness(S, df3, 1500, 9000);
-    if (opts.drums) drumBands.forEach(([a, b], j) => (drumE[j][i] = Math.log1p(bandEnergy(S, df3, a, b) * 100)));
-
-    // melody (centre channel) and chords/key (full mix)
-    const { mix: A, center: C } = stereoSpectra(L, R, c, N1);
-    ctrE[i] = bandEnergy(C, df1, 150, 4000);
-    const W = ai ? null : whiten(C, 24), WA = whiten(A, 24);
-    const sal = new Float32Array(128), ms = new Float32Array(128);
-    const aiRow = ai && ai.mel[Math.min(i, ai.mel.length - 1)];
-    for (let m = MEL_LO; m <= MEL_HI; m++) {
-      const v = ai ? aiRow[m] : Math.max(0, salience(W, df1, m, 8, tune));
-      sal[m] = (m === bassPc || m === bassPc + 12) ? 0 : v;
-      ms[m] = Math.max(0, salience(WA, df1, m, 8, tune));
-      if (ai) chroma[m % 12] += v;
-    }
-    if (!ai) { // key: plain spectral energy per pitch class (tuning-corrected)
-      for (let k = Math.ceil(80 / df1); k < 2000 / df1; k++) {
-        const pc = Math.round(69 + 12 * Math.log2((k * df1) / 440) - tune);
-        chroma[((pc % 12) + 12) % 12] += A[k] * A[k];
-      }
-    }
-    melSal.push(sal); mixSal.push(ms);
-  }
-
-  const key = detectKey(chroma);
-  const tracks = { mel: [], bass: [], harmony: [], drums: [], key, tuning: tune };
-
-  // --- melody: normalise salience, then follow the most likely line ---
-  const peaks = melSal.map(sa => sa.reduce((a, b) => Math.max(a, b), 0));
-  const P = percentile(peaks, 0.9) || 1;
-  const E90 = percentile(ctrE, 0.9) || 1;
-  const norm = ai ? melSal : melSal.map(sa => sa.map(v => v / P)); // the AI already gives 0..1 probabilities
-  const voicedness = Array.from(ctrE, e => Math.min(1, e / (E90 * D.voice)));
-  const pitch = trackMelody(norm, voicedness, MEL_LO, MEL_HI, D);
-  smoothTrack(pitch, 3);
-  absorbScoops(pitch, 4);
-  // with the AI, repeated notes come from its own onset output (below); flux onsets also fire on guitar strums
-  const melOn = ai ? new Uint8Array(nF) : pickOnsets(ctrFlux, D.onsetK, 20, 0);
-  tracks.mel = segment(pitch, melOn, D.minMel, i => peaks[i], ctrFlux);
-  if (ai) { // the model's onset output catches repeated notes (same pitch sung twice)
-    const minF = Math.max(2, Math.round(D.minMel / HOP_SEC));
-    const split = [];
-    for (const n of tracks.mel) {
-      const f0 = Math.round(n.t / HOP_SEC), f1 = Math.round((n.t + n.dur) / HOP_SEC);
-      const on = i => ai.onset[i]?.[n.midi] || 0;
-      const cuts = [];
-      let last = f0;
-      for (let i = f0 + minF; i <= f1 - minF; i++) {
-        if (on(i) > D.aiOnset && on(i) >= on(i - 1) && on(i) >= on(i + 1) && i - last >= minF) { cuts.push(i); last = i; }
-      }
-      let start = n.t;
-      for (const c of cuts) { split.push({ ...n, t: start, dur: c * HOP_SEC - start }); start = c * HOP_SEC; }
-      split.push({ ...n, t: start, dur: n.t + n.dur - start });
-    }
-    tracks.mel = split;
-  }
-  if (opts.inKey) tracks.mel = tracks.mel.map(n => snapToKey(n, key, melSal));
-
-  // --- harmony: a second chord note under each melody note ---
-  if (opts.harmony) {
-    for (const n of tracks.mel) {
-      const sa = mixSal[n.frame];
-      let best = -1, bs = 0;
-      for (let m = MEL_LO; m <= MEL_HI - 12; m++) {
-        const d = Math.abs(m - n.midi);
-        if (d < 3 || d % 12 === 0 || (opts.inKey && !key.scale.has(m % 12))) continue;
-        if (sa[m] > bs) { bs = sa[m]; best = m; }
-      }
-      if (best >= 0 && bs > 0.3 * (sa[n.midi] || bs)) tracks.harmony.push({ t: n.t, dur: n.dur, midi: best, strength: bs });
-    }
-  }
-
-  // --- bass notes ---
-  if (opts.bass) {
-    const B90 = percentile(bassE, 0.9) || 1;
-    const bp = new Int16Array(nF).fill(-1);
-    for (let i = 0; i < nF; i++) if (bassE[i] > B90 * D.voice * 1.5 && bassProm[i] > D.prom && bassBest[i] >= 0) bp[i] = bassBest[i];
-    smoothTrack(bp, 2);
-    const bOn = pickOnsets(lowFlux, D.onsetK, 20, 0);
-    tracks.bass = segment(bp, bOn, D.minBass, i => bassE[i], lowFlux);
-    if (opts.inKey) tracks.bass = tracks.bass.map(n => (key.scale.has(n.midi % 12) ? n : { ...n, midi: n.midi + (key.scale.has((n.midi + 1) % 12) ? 1 : -1) }));
-  }
-
-  // --- drums ---
-  if (opts.drums) {
-    const kinds = ['kick', 'snare', 'hat'];
-    const ons = drumE.map(e => {
-      const flux = new Float32Array(nF);
-      for (let i = 1; i < nF; i++) flux[i] = Math.max(0, e[i] - e[i - 1]);
-      return pickOnsets(flux, D.drumK, 24, 0.15);
-    });
-    // a snare is noisy; a melody note attack in the same band is tonal
-    for (let i = 0; i < nF; i++) if (ons[1][i] && flat[i] < 0.35) ons[1][i] = 0;
-    let last = -10;
-    for (let i = 0; i < nF; i++) {
-      const j = ons.findIndex(o => o[i]); // priority: kick > snare > hat
-      if (j < 0) continue;
-      const prev = tracks.drums[tracks.drums.length - 1];
-      if (i - last <= 3 && prev) { if (j < kinds.indexOf(prev.kind)) prev.kind = kinds[j]; continue; } // same hit
-      tracks.drums.push({ t: i * HOP_SEC, kind: kinds[j] });
-      last = i;
-    }
-  }
-  return tracks;
-}
-
-/** Out-of-key note -> the neighbouring in-key note that the audio supports best. */
-function snapToKey(n, key, sal) {
-  if (key.scale.has(((n.midi % 12) + 12) % 12)) return n;
-  const f0 = Math.round(n.t / HOP_SEC), f1 = Math.max(f0, Math.round((n.t + n.dur) / HOP_SEC) - 1);
-  const support = m => { let s = 0; for (let i = f0; i <= f1 && i < sal.length; i++) s += sal[i][m] || 0; return s; };
-  const up = n.midi + 1, down = n.midi - 1;
-  const cands = [up, down].filter(m => key.scale.has(m % 12));
-  if (!cands.length) return n;
-  const best = cands.sort((a, b) => support(b) - support(a))[0];
-  return { ...n, midi: best, snapped: true };
-}
-
-/** A singer sliding into a note shows up as a short lower note right before it: merge it into the real note. */
-function absorbScoops(p, maxLen) {
-  let i = 0;
-  while (i < p.length) {
-    if (p[i] < 0) { i++; continue; }
-    let j = i; while (j + 1 < p.length && p[j + 1] === p[i]) j++;
-    const next = p[j + 1];
-    if (j - i + 1 <= maxLen && next >= 0 && next !== undefined && Math.abs(next - p[i]) <= 2) for (let k = i; k <= j; k++) p[k] = next;
-    i = j + 1;
-  }
-}
-
-/** Fill short glitches and gaps (up to `maxLen` frames) in a pitch track. */
-function smoothTrack(p, maxLen) {
-  for (let len = 1; len <= maxLen; len++) {
-    for (let i = 1; i + len < p.length; i++) {
-      const a = p[i - 1];
-      if (a >= 0 && p[i + len] === a) for (let j = i; j < i + len; j++) if (p[j] !== a) p[j] = a;
-    }
-  }
-}
-/** Pitch track + onsets -> note list. Note starts snap to the sharpest nearby onset in `flux`. */
-function segment(p, onsets, minDur, strengthOf, flux) {
-  const notes = [];
-  let cur = null;
-  const close = () => {
-    if (cur && (cur.end - cur.start + 1) * HOP_SEC >= minDur - 1e-9) {
-      notes.push({ t: cur.start * HOP_SEC, dur: (cur.end - cur.start + 1) * HOP_SEC, midi: cur.midi, frame: cur.peak, strength: cur.s });
-    }
-    cur = null;
-  };
-  for (let i = 0; i < p.length; i++) {
-    if (p[i] < 0) { close(); continue; }
-    const retrigger = cur && onsets[i] && i - cur.start >= 4;
-    if (!cur || p[i] !== cur.midi || retrigger) {
-      close();
-      let st = i;
-      for (let j = Math.max(0, i - 5); j <= Math.min(p.length - 1, i + 1); j++) if (flux[j] > flux[st]) st = j;
-      if (notes.length && st <= Math.round((notes[notes.length - 1].t + notes[notes.length - 1].dur) / HOP_SEC) - 1) st = i;
-      cur = { start: st, end: i, midi: p[i], peak: i, s: strengthOf(i) };
-    }
-    else { cur.end = i; const s = strengthOf(i); if (s > cur.s) { cur.s = s; cur.peak = i; } }
-  }
-  close();
-  return notes;
 }
 
 // ---------- mapping to Minecraft ----------
@@ -678,43 +184,34 @@ function playPreview() {
   const t0 = ac.currentTime + 0.1;
   for (const r of state.song.rows) for (const e of r.events) synthNote(ac, master, e, t0 + r.time);
 }
+/** Plays every track of the chosen part (what the MIDI really sounds like, roughly). */
 function playOriginal() {
-  if (state.midi) {
-    stopAll();
-    const ac = ctx(); ac.resume();
-    const master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
-    const t0 = ac.currentTime + 0.1, s = state.settings;
-    for (const t of state.midi.tracks) for (const n of t.notes) {
-      if (n.time < s.start || n.time >= s.start + s.length) continue;
-      const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.5 };
-      synthNote(ac, master, e, t0 + n.time - s.start);
-    }
-    return;
-  }
-  if (!state.buffer) return;
+  if (!state.midi || !state.settings) return;
   stopAll();
   const ac = ctx(); ac.resume();
-  const src = ac.createBufferSource(); src.buffer = state.buffer; src.connect(ac.destination);
-  src.start(0, state.settings.start, state.settings.length); playing.push(src);
+  const master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
+  const t0 = ac.currentTime + 0.1, s = state.settings;
+  for (const t of state.midi.tracks) for (const n of t.notes) {
+    if (n.time < s.start || n.time >= s.start + s.length) continue;
+    const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.4 };
+    synthNote(ac, master, e, t0 + n.time - s.start);
+  }
 }
 
 // ---------- UI ----------
-const state = { buffer: null, left: null, right: null, midi: null, fileName: '', song: null, steps: [], pos: 0, settings: null };
+const state = { midi: null, fileName: '', song: null, steps: [], pos: 0, settings: null };
 
 function segValue(id) { return $(`#${id} button.active`).dataset.v; }
 function readSettings() {
   return {
     start: Math.max(0, +$('#start').value || 0),
     length: Math.max(1, +$('#length').value || 20),
-    detail: +segValue('detail'),
     ticks: +segValue('ticks'),
     inst1: $('#inst1').value, inst2: $('#inst2').value, inst3: $('#inst3').value,
     mode2: segValue('mode2'), mode3: segValue('mode3'),
     transpose: Math.max(-12, Math.min(12, Math.round(+$('#transpose').value || 0))),
     target: $('#target').value,
     build: segValue('build'),
-    inKey: $('#inKey').checked,
-    engine: segValue('engine'),
   };
 }
 
@@ -723,7 +220,7 @@ function fillInstruments() {
   const all = Object.keys(INSTRUMENTS);
   $('#inst1').innerHTML = opts('note.harp', all);
   $('#inst2').innerHTML = opts('note.bass', all);
-  $('#inst3').innerHTML = opts('note.bell', all);
+  $('#inst3').innerHTML = opts('note.guitar', all);
   syncLayers();
 }
 function syncLayers() {
@@ -746,144 +243,115 @@ function loadMidi(data, name) {
     idx, notes: t.notes, drums: t.instrument.percussion || t.channel === 9,
     name: (t.name || t.instrument.name || `Track ${idx + 1}`).trim(),
     avg: t.notes.reduce((a, n) => a + n.midi, 0) / (t.notes.length || 1),
+    first: t.notes.length ? Math.min(...t.notes.map(n => n.time)) : 0,
   })).filter(t => t.notes.length);
-  if (!tracks.length) throw new Error('that MIDI file has no notes');
+  if (!tracks.some(t => !t.drums)) throw new Error('that MIDI file has no melody notes');
   const tonal = tracks.filter(t => !t.drums);
   const most = Math.max(...tonal.map(t => t.notes.length), 1);
   const busy = tonal.filter(t => t.notes.length >= most * 0.2);
   const melody = [...busy].sort((a, b) => b.avg - a.avg)[0] || tonal[0];
-  const bass = [...tonal].sort((a, b) => a.avg - b.avg)[0];
-  state.midi = { midi, tracks, pick: { mel: melody?.idx, bass: bass?.idx, harmony: melody?.idx } };
-  state.left = state.right = state.buffer = null;
+  const bassTrack = tonal.filter(t => t !== melody && (/bass/i.test(t.name) || t.avg < 48)).sort((a, b) => a.avg - b.avg)[0];
+  state.midi = { midi, tracks, pick: { mel: melody.idx, bass: bassTrack ? bassTrack.idx : 'auto', harmony: 'auto' } };
   state.fileName = name;
   renderMidiTracks();
   $('#drop').classList.add('loaded');
-  $('#dropText').innerHTML = `&#127929; <b>${esc(name)}</b> (MIDI: exact notes)`;
-  $('#songInfo').textContent = `Song length: ${fmtTime(midi.duration)}. MIDI files give the exact notes, so no listening is needed.`;
+  $('#dropText').innerHTML = `&#127929; <b>${esc(name)}</b>`;
+  $('#songInfo').textContent = `Song length: ${fmtTime(midi.duration)}. ${tracks.length} tracks. Every note becomes a command block, so start with 10–30 seconds.`;
   $('#length').value = Math.min(+$('#length').value || 20, Math.ceil(midi.duration));
-  document.body.classList.add('midi-mode');
   $('#convert').disabled = false;
   $('#status').textContent = '';
 }
 
 function renderMidiTracks() {
   const m = state.midi;
-  const opts = sel => m.tracks.filter(t => !t.drums).map(t =>
-    `<option value="${t.idx}" ${t.idx === sel ? 'selected' : ''}>${esc(t.name)} · ${t.notes.length} notes · around ${noteName(Math.round(t.avg))}</option>`).join('');
+  const opts = (sel, auto) => (auto ? `<option value="auto" ${sel === 'auto' ? 'selected' : ''}>${auto}</option>` : '') +
+    m.tracks.filter(t => !t.drums).map(t =>
+      `<option value="${t.idx}" ${t.idx === sel ? 'selected' : ''}>${esc(t.name)} · ${t.notes.length} notes · from ${fmtTime(t.first)}</option>`).join('');
   const drums = m.tracks.filter(t => t.drums);
   $('#midiTracks').innerHTML = `
     <label>Melody comes from</label><select data-pick="mel">${opts(m.pick.mel)}</select>
-    <label>Bass comes from</label><select data-pick="bass">${opts(m.pick.bass)}</select>
-    <label>Harmony comes from</label><select data-pick="harmony">${opts(m.pick.harmony)}</select>
-    <div class="hint">${drums.length ? `Drums: ${drums.map(t => esc(t.name)).join(', ')}` : 'No drum track in this file.'}</div>`;
-  $$('#midiTracks [data-pick]').forEach(sel => (sel.onchange = () => (m.pick[sel.dataset.pick] = +sel.value)));
+    <label>Bass comes from</label><select data-pick="bass">${opts(m.pick.bass, 'Auto: lowest note of all other tracks')}</select>
+    <label>Harmony comes from</label><select data-pick="harmony">${opts(m.pick.harmony, 'Auto: chord notes from all other tracks')}</select>
+    <div class="hint">${drums.length ? `Drums: ${drums.map(t => `${esc(t.name)} (from ${fmtTime(t.first)})`).join(', ')}` : 'No drum track in this file.'}</div>`;
+  $$('#midiTracks [data-pick]').forEach(sel => (sel.onchange = () => (m.pick[sel.dataset.pick] = sel.value === 'auto' ? 'auto' : +sel.value)));
 }
 
+/** Notes for each layer in the chosen part of the song (times relative to the start). */
 function midiTracks(s) {
   const m = state.midi, end = s.start + s.length;
-  const grab = idx => (m.tracks.find(t => t.idx === idx)?.notes || [])
-    .filter(n => n.time >= s.start - 1e-6 && n.time < end)
-    .map(n => ({ t: n.time - s.start, dur: n.duration, midi: n.midi }));
-  const drums = m.tracks.filter(t => t.drums).flatMap(t => t.notes)
-    .filter(n => n.time >= s.start - 1e-6 && n.time < end)
+  const inRange = n => n.time >= s.start - 1e-6 && n.time < end;
+  const conv = n => ({ t: n.time - s.start, dur: n.duration, midi: n.midi });
+  const tonal = m.tracks.filter(t => !t.drums);
+  const from = (pick, exclude) => (pick === 'auto' ? tonal.filter(t => !exclude.includes(t.idx)) : tonal.filter(t => t.idx === pick))
+    .flatMap(t => t.notes.filter(inRange).map(conv));
+  const drums = m.tracks.filter(t => t.drums).flatMap(t => t.notes).filter(inRange)
     .map(n => ({ t: n.time - s.start, kind: gmDrum(n.midi) }))
     .sort((a, b) => a.t - b.t || ['kick', 'snare', 'hat'].indexOf(a.kind) - ['kick', 'snare', 'hat'].indexOf(b.kind));
-  return { mel: grab(m.pick.mel), bass: grab(m.pick.bass), harmony: grab(m.pick.harmony), drums };
+  return {
+    mel: from(m.pick.mel, []),
+    bass: from(m.pick.bass, [m.pick.mel]),
+    harmony: from(m.pick.harmony, [m.pick.mel, m.pick.bass]),
+    drums,
+  };
 }
 
 async function loadFile(file) {
   if (!file) return;
-  $('#status').textContent = 'Reading song…';
   try {
     const data = await file.arrayBuffer();
-    const head = new Uint8Array(data.slice(0, 4));
-    if (/\.midi?$/i.test(file.name) || String.fromCharCode(...head) === 'MThd') return loadMidi(data, file.name);
-    state.midi = null;
-    document.body.classList.remove('midi-mode');
-    const buffer = await ctx().decodeAudioData(data);
-    state.buffer = buffer;
-    state.fileName = file.name;
-    // resample to SR, keeping stereo (the centre of the stereo image is where the vocal usually sits)
-    const len = Math.ceil(Math.min(buffer.duration, MAX_SECONDS + 600) * SR);
-    const off = new OfflineAudioContext(2, len, SR);
-    const src = off.createBufferSource(); src.buffer = buffer; src.connect(off.destination); src.start();
-    const rendered = await off.startRendering();
-    state.left = rendered.getChannelData(0);
-    state.right = buffer.numberOfChannels > 1 ? rendered.getChannelData(1) : state.left;
-    $('#drop').classList.add('loaded');
-    $('#dropText').innerHTML = `&#9835; <b>${esc(file.name)}</b>`;
-    $('#songInfo').textContent = `Song length: ${fmtTime(buffer.duration)}. Every note becomes a command block, so start with 10–30 seconds.`;
-    $('#length').value = Math.min(+$('#length').value || 20, Math.floor(buffer.duration));
-    $('#convert').disabled = false;
-    $('#status').textContent = '';
+    if (String.fromCharCode(...new Uint8Array(data.slice(0, 4))) !== 'MThd') throw new Error('that is not a MIDI file (.mid)');
+    loadMidi(data, file.name);
   } catch (err) {
-    $('#status').textContent = 'Could not read that file: ' + (err.message || err) + '. Try a different MP3.';
+    $('#status').textContent = 'Could not read that file: ' + (err.message || err);
   }
 }
-const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
 function convert() {
-  if (state.midi) return convertMidi();
-  if (!state.left) return;
+  if (!state.midi) return;
   const s = readSettings();
-  if (s.length > MAX_SECONDS) { s.length = MAX_SECONDS; $('#length').value = MAX_SECONDS; }
-  const a = Math.floor(s.start * SR), b = Math.min(state.left.length, Math.floor((s.start + s.length) * SR));
-  if (b - a < SR * 0.5) { $('#status').textContent = 'That part of the song is too short (or past the end).'; return; }
-  s.length = (b - a) / SR;
-  state.settings = s;
-  $('#status').textContent = 'Listening…';
-  $('#convert').disabled = true;
-  setTimeout(async () => {
-    const t0 = performance.now();
-    const L = state.left.subarray(a, b);
-    const R = state.right === state.left ? null : state.right.subarray(a, b);
-    const opts = { detail: s.detail, inKey: s.inKey, bass: s.mode2 === 'bass', drums: s.mode3 === 'drums', harmony: s.mode3 === 'harmony' };
-    let note = '';
-    if (s.engine === 'ai') {
-      try {
-        const hop = Math.round(SR * HOP_SEC), nF = Math.max(1, Math.floor(L.length / hop));
-        const { y, r } = repitch(centerSignal(L, R), -estimateTuning(L, R || L, hop, nF));
-        const out = await transcribe(y, p => ($('#status').textContent = `AI is listening… ${Math.round(p * 100)}%`));
-        opts.ai = { mel: toGrid(out.frames, nF, r), onset: toGrid(out.onsets, nF, r) };
-      } catch (err) {
-        note = ` (AI engine unavailable: ${err.message || err}. Used the quick engine.)`;
-      }
-    }
-    const tracks = analyze(L, R, opts);
-    state.tracks = tracks;
-    state.song = buildSong(tracks, s);
-    state.steps = buildSteps(state.song);
-    state.pos = 0;
-    const cents = Math.round(tracks.tuning * 100);
-    $('#status').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s. Key: ${tracks.key.name}` +
-      (Math.abs(cents) >= 5 ? `, recording is ${Math.abs(cents)} cents ${cents > 0 ? 'sharp' : 'flat'} (corrected).` : '.') + note;
-    $('#convert').disabled = false;
-    renderResult();
-  }, 20);
-}
-
-function convertMidi() {
-  const s = readSettings();
-  s.length = Math.max(1, Math.min(s.length, MAX_SECONDS, state.midi.midi.duration - s.start));
-  if (s.start >= state.midi.midi.duration) { $('#status').textContent = 'Start is past the end of the song.'; return; }
+  const dur = state.midi.midi.duration;
+  if (s.start >= dur) { $('#status').textContent = `Start is past the end of the song (${fmtTime(dur)}).`; return; }
+  s.length = Math.max(1, Math.min(s.length, MAX_SECONDS, dur - s.start));
   state.settings = s;
   state.tracks = midiTracks(s);
   state.song = buildSong(state.tracks, s);
   state.steps = buildSteps(state.song);
   state.pos = 0;
-  $('#status').textContent = 'Done (exact notes from MIDI).';
+  $('#status').textContent = 'Done.';
   renderResult();
+}
+
+/** Why an enabled layer came out empty, in plain words. */
+function layerWarnings(s) {
+  const m = state.midi, warn = [];
+  const count = l => state.song.rows.filter(r => r.events.some(e => e.layer === l)).length;
+  const range = `${s.start}–${(s.start + s.length).toFixed(1)} s`;
+  const why = pick => {
+    if (pick === 'auto') return 'none of the other tracks play here';
+    const t = m.tracks.find(x => x.idx === pick);
+    return t.first >= s.start + s.length ? `“${t.name}” only starts at ${t.first.toFixed(1)} s` : `“${t.name}” is silent here`;
+  };
+  if (!count(0)) warn.push(`Melody: no notes in ${range} (${why(m.pick.mel)}).`);
+  if (s.mode2 === 'bass' && !count(1)) warn.push(`Bass: no notes in ${range} (${why(m.pick.bass)}). Try “Auto” or a later part of the song.`);
+  if (s.mode3 === 'harmony' && !count(2)) warn.push(`Harmony: nothing under the melody in ${range} (${why(m.pick.harmony)}). Try “Auto”.`);
+  if (s.mode3 === 'drums' && !count(2)) {
+    const d = m.tracks.filter(t => t.drums);
+    warn.push(`Drums: no hits in ${range}${d.length ? ` (drums start at ${Math.min(...d.map(t => t.first)).toFixed(1)} s)` : ' (this MIDI has no drum track)'}.`);
+  }
+  return warn;
 }
 
 function renderResult() {
   const song = state.song, s = song.settings;
   const blocks = state.steps.length;
   const repeaterCount = song.rows.reduce((a, r) => a + repeaters(r.waitTicks).length, 0);
+  const n = l => song.rows.filter(r => r.events.some(e => e.layer === l)).length;
   const layers = [
-    `Melody: ${INSTRUMENTS[s.inst1].label}`,
-    s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label}` : null,
-    s.mode3 === 'drums' ? 'Drums: kick / snare / hat' : s.mode3 === 'harmony' ? `Harmony: ${INSTRUMENTS[s.inst3].label}` : null,
+    `Melody: ${INSTRUMENTS[s.inst1].label} (${n(0)} notes)`,
+    s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label} (${n(1)} notes)` : null,
+    s.mode3 === 'drums' ? `Drums: kick / snare / hat (${n(2)} hits)` : s.mode3 === 'harmony' ? `Harmony: ${INSTRUMENTS[s.inst3].label} (${n(2)} notes)` : null,
   ];
+  const warnings = layerWarnings(s);
   const chain = s.build === 'chain';
   $('#result').innerHTML = `
     <div class="card">
@@ -897,6 +365,7 @@ function renderResult() {
       </div>
       <canvas class="roll" id="roll"></canvas>
       <div class="legend-row">${layers.map((l, i) => l ? `<span><i class="swatch" style="background:${LAYER_COLORS[i]}"></i>${esc(l)}</span>` : '').join('')}</div>
+      ${warnings.map(w => `<p class="warnline">&#9888; ${esc(w)}</p>`).join('')}
       ${blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part, "Simple tune", or the 2-tick grid.</p>` : ''}
     </div>
 
@@ -1053,5 +522,5 @@ function init() {
 }
 
 // exposed for automated tests
-window.MM = { state, analyze, buildSong, buildSteps, repeaters, fitToInstrument, INSTRUMENTS, SR };
+window.MM = { state, buildSong, buildSteps, repeaters, fitToInstrument, midiTracks, INSTRUMENTS };
 init();

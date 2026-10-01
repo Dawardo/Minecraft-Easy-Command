@@ -47,7 +47,4 @@ table.steps-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .steps-table .wait { white-space: nowrap; color: var(--warn); }
 .table-wrap { max-height: 520px; overflow: auto; }
 .kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; }
-label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 13px; margin-top: 12px; }
-body.midi-mode .audio-only { display: none !important; }
-body:not(.midi-mode) .midi-only { display: none !important; }
-.tip { background: #1f2a1c; border: 1px solid var(--accent-dark); border-radius: 6px; padding: 7px 9px; color: var(--text); margin-top: 8px; }
+.warnline { color: var(--warn); margin: 6px 0 0; font-size: 13px; }
