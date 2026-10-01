@@ -58,7 +58,7 @@ namespace Bdm {
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 
     const uint INPUT_MOUSE = 0, INPUT_KEYBOARD = 1;
-    const uint KEYUP = 0x0002, SCANCODE = 0x0008;
+    const uint KEYUP = 0x0002, SCANCODE = 0x0008, EXTENDED = 0x0001;
 
     static void Send(INPUT i) { SendInput(1, new INPUT[] { i }, Marshal.SizeOf(typeof(INPUT))); }
 
@@ -69,10 +69,15 @@ namespace Bdm {
     public static void Key(int vk, bool up, bool useScan) {
       INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
       i.U.ki.wScan = (ushort)MapVirtualKey((uint)vk, 0);
-      if (useScan) { i.U.ki.dwFlags = SCANCODE | (up ? KEYUP : 0); }
-      else { i.U.ki.wVk = (ushort)vk; i.U.ki.dwFlags = (up ? KEYUP : 0); }
+      // Insert, Delete, Home, End, Page Up/Down and the arrows are "extended" keys
+      uint ext = ((vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E) ? EXTENDED : 0;
+      if (useScan) { i.U.ki.dwFlags = SCANCODE | ext | (up ? KEYUP : 0); }
+      else { i.U.ki.wVk = (ushort)vk; i.U.ki.dwFlags = ext | (up ? KEYUP : 0); }
       Send(i);
     }
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    // asks the focused window to paste, without pressing any keys
+    public static void PostPaste() { PostMessage(GetForegroundWindow(), 0x0302, IntPtr.Zero, IntPtr.Zero); }
     public static void Unicode(char c, bool up) {
       INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
       i.U.ki.wScan = c; i.U.ki.dwFlags = UNICODE | (up ? KEYUP : 0);
@@ -112,7 +117,7 @@ namespace Bdm {
   [void][Bdm.Win]::SetProcessDPIAware()
 }
 
-$VK = @{ Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
+$VK = @{ Shift = 0x10; Insert = 0x2D; Ctrl = 0x11; Enter = 0x0D; Esc = 0x1B; Back = 0x08; V = 0x56; A = 0x41; F8 = 0x77; F9 = 0x78; F12 = 0x7B }
 $M = @{ LeftDown = 0x0002; LeftUp = 0x0004; RightDown = 0x0008; RightUp = 0x0010; Wheel = 0x0800 }
 
 $script:speedMul = 1.0
@@ -137,15 +142,27 @@ function Combo([int]$vk) {
 }
 function Clip([string]$text) { Act "clipboard = $text"; if (-not $DryRun) { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 60 } }
 # Puts text into whatever text box has focus, using the chosen method.
+function ShiftInsert {
+  [Bdm.Win]::Key($VK.Shift, $false, (UseScan)); Start-Sleep -Milliseconds 30
+  [Bdm.Win]::Key($VK.Insert, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($VK.Insert, $true, (UseScan)); Start-Sleep -Milliseconds 30
+  [Bdm.Win]::Key($VK.Shift, $true, (UseScan)); Start-Sleep -Milliseconds 30
+}
 function TypeText([string]$text) {
   Act "type ($($script:input.text)): $text"
   if ($DryRun) { return }
   switch ($script:input.text) {
-    'paste' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 60; Combo $VK.V }
-    'unicode' { foreach ($c in $text.ToCharArray()) { [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 8; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 8 } }
+    'paste' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; Combo $VK.V }
+    'paste-ins' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; ShiftInsert }
+    'paste-msg' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 80; [Bdm.Win]::PostPaste() }
     default {
+      # typing: after the first character Bedrock may pop up command suggestions and swallow the next key,
+      # so pause after it, then type steadily
+      $first = $true
       foreach ($c in $text.ToCharArray()) {
-        if (-not [Bdm.Win]::TypeChar($c, (UseScan), 8)) { [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 8; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 8 }
+        if ($script:input.text -eq 'unicode' -or -not [Bdm.Win]::TypeChar($c, (UseScan), 12)) {
+          [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 12; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 12
+        }
+        if ($first) { Start-Sleep -Milliseconds 450; $first = $false } else { Start-Sleep -Milliseconds 15 }
       }
     }
   }
@@ -221,11 +238,12 @@ function Chat([string]$command) {
 # Tries each way of typing in chat; you say (F8 / F9) whether the message showed up.
 function TypingTest {
   $methods = @(
-    @{ keys = 'vk'; text = 'type'; name = 'typing keys (normal)' },
+    @{ keys = 'vk'; text = 'paste'; name = 'pasting with Ctrl+V' },
+    @{ keys = 'vk'; text = 'paste-ins'; name = 'pasting with Shift+Insert' },
+    @{ keys = 'vk'; text = 'paste-msg'; name = 'pasting without keys (paste message)' },
+    @{ keys = 'vk'; text = 'type'; name = 'typing key by key' },
     @{ keys = 'vk'; text = 'unicode'; name = 'typing characters (unicode)' },
-    @{ keys = 'vk'; text = 'paste'; name = 'pasting (Ctrl+V)' },
-    @{ keys = 'scan'; text = 'type'; name = 'typing keys (scan codes)' },
-    @{ keys = 'scan'; text = 'paste'; name = 'pasting (scan-code Ctrl+V)' }
+    @{ keys = 'scan'; text = 'type'; name = 'typing key by key (scan codes)' }
   )
   Log ''
   Log '=== Typing test (one time) ===' 'Cyan'
@@ -239,7 +257,7 @@ function TypingTest {
     TapScan ([int][char]$ChatKey.ToUpper()); Start-Sleep -Milliseconds 900
     TypeText "/tell @s Music builder test $n"; Start-Sleep -Milliseconds 400
     Tap $VK.Enter; Start-Sleep -Milliseconds 1200
-    Log "   Do you see 'Music builder test $n' in chat?  F8 = YES    F9 = NO" 'Yellow'
+    Log "   Did the whisper 'Music builder test $n' show up (with nothing missing, and no 'unknown command' error)?  F8 = YES    F9 = NO" 'Yellow'
     Beep
     while ($true) {
       if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; Log "   Using: $($m.name)" 'Green'; return $script:input }
@@ -466,13 +484,16 @@ EnsureMinecraft
 # how to type into Minecraft (found once by the typing test, then remembered)
 $inputFile = Join-Path $here 'input.json'
 if ($DryRun) { $script:input = @{ keys = 'vk'; text = 'type' } }
-elseif (-not $Retest -and (Test-Path $inputFile)) {
-  $saved = Get-Content $inputFile -Raw | ConvertFrom-Json
-  $script:input = @{ keys = $saved.keys; text = $saved.text }
-  Log "Typing method: $($saved.text) / $($saved.keys) (run with -Retest to test again)"
-} else {
-  $script:input = TypingTest
-  $script:input | ConvertTo-Json | Set-Content -Path $inputFile -Encoding UTF8
+else {
+  $saved = $null
+  if (-not $Retest -and (Test-Path $inputFile)) { $saved = Get-Content $inputFile -Raw | ConvertFrom-Json }
+  if ($saved -and $saved.version -eq 2) {
+    $script:input = @{ keys = $saved.keys; text = $saved.text }
+    Log "Typing method: $($saved.text) / $($saved.keys) (run with -Retest to test again)"
+  } else {
+    $script:input = TypingTest
+    @{ keys = $script:input.keys; text = $script:input.text; version = 2 } | ConvertTo-Json | Set-Content -Path $inputFile -Encoding UTF8
+  }
 }
 
 $fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)

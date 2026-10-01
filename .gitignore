@@ -3,3 +3,4 @@ tests/out/
 tools/calibration.json
 *.progress.json
 *.dryrun-progress.json
+tools/input.json
