@@ -1,11 +1,13 @@
 # Publishes a GitHub release with a ready-to-use zip when:
-#   - the VERSION file changes in a push (the release is tagged v<VERSION>), or
+#   - the VERSION file (or this workflow) changes in a push: the release is tagged v<VERSION>
+#     (skipped if that release exists already), or
 #   - a version tag (v1.0.0, v1.1.0, ...) is pushed.
 name: Release
 on:
   push:
+    branches: ['**']
     tags: ['v*']
-    paths: ['VERSION']
+    paths: ['VERSION', '.github/workflows/release.yml']   # tag pushes ignore this filter
 permissions:
   contents: write
 jobs:
