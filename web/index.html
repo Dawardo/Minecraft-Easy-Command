@@ -32,7 +32,6 @@
         <div><label>Length (seconds)</label><input type="number" id="length" value="20" min="1" step="1"></div>
       </div>
       <div class="hint" id="songInfo">Every note becomes a command block, so start with 10–30 seconds.</div>
-      <div id="midiTracks"></div>
     </div>
 
     <div class="card">
@@ -42,21 +41,27 @@
         <button data-v="1" class="active">1 tick (0.1 s)</button><button data-v="2">2 ticks (0.2 s)</button>
       </div>
 
-      <div class="layer">
-        <div class="layer-head"><b>Layer 1: Melody</b><span class="pill">always on</span></div>
-        <select id="inst1"></select>
+      <div class="layer" id="layer1">
+        <div class="layer-head"><b>1. Melody</b><span class="onoff">ON</span></div>
+        <label>Instrument</label><select id="inst1"></select>
+        <label>Notes from</label><select id="src1"><option value="auto">Auto</option></select>
       </div>
-      <div class="layer">
-        <div class="layer-head"><b>Layer 2</b>
-          <div class="seg small" id="mode2"><button data-v="off">Off</button><button data-v="bass" class="active">Extra bass</button></div>
-        </div>
-        <select id="inst2"></select>
+      <div class="layer" id="layer2">
+        <div class="layer-head"><label class="switch"><input type="checkbox" id="on2" checked> <b>2. Bass</b></label><span class="onoff" id="state2">ON</span></div>
+        <label>Instrument</label><select id="inst2"></select>
+        <label>Notes from</label><select id="src2"><option value="auto">Auto</option></select>
       </div>
-      <div class="layer">
-        <div class="layer-head"><b>Layer 3</b>
-          <div class="seg small" id="mode3"><button data-v="off" class="active">Off</button><button data-v="drums">Drums</button><button data-v="harmony">Harmony</button></div>
-        </div>
-        <select id="inst3"></select>
+      <div class="layer" id="layer3">
+        <div class="layer-head"><label class="switch"><input type="checkbox" id="on3" checked> <b>3. Drums / harmony</b></label><span class="onoff" id="state3">ON</span></div>
+        <label>Plays</label>
+        <select id="mode3">
+          <option value="auto" selected>Auto: drums where the song has drums, harmony where it doesn't</option>
+          <option value="drums">Drums only</option>
+          <option value="harmony">Harmony only</option>
+        </select>
+        <label>Harmony instrument</label><select id="inst3" class="harm"></select>
+        <label>Harmony notes from</label><select id="src3" class="harm"><option value="auto">Auto</option></select>
+        <div class="hint" id="drumInfo">Drums use note.bd (kick), note.snare and note.hat.</div>
       </div>
 
       <div class="grid2">
@@ -72,7 +77,7 @@
       <div class="seg" id="build">
         <button data-v="repeater" class="active">Repeaters</button><button data-v="chain">Chain blocks (no redstone)</button>
       </div>
-      <button class="primary big" id="convert" disabled>Convert</button>
+      <div class="hint live-note">Changes apply instantly.</div>
       <div class="hint" id="status"></div>
     </div>
   </aside>
@@ -81,9 +86,9 @@
     <div class="card empty">
       <h2>How it works</h2>
       <ol class="steps">
-        <li>Pick a MIDI file (search "song name midi") and the part of the song you want.</li>
-        <li>Choose which track is the melody, then add layers: extra bass, plus drums or harmony (max 3 instruments).</li>
-        <li>Click <b>Convert</b>, then <b>&#9654; Minecraft preview</b> to hear what the note blocks will sound like.</li>
+        <li>Drop in a MIDI file (search "song name midi"). The commands appear straight away: melody, bass and drums/harmony are all picked automatically.</li>
+        <li>Optional: change the part of the song, the instruments, or which track a layer uses. Everything updates instantly.</li>
+        <li>Click <b>&#9654; Minecraft preview</b> to hear what the note blocks will sound like.</li>
         <li>Build it with <b>Copy next</b>: each click copies the next command and tells you the repeater delay to set.</li>
       </ol>
       <p class="hint">Everything runs on your PC. Nothing is uploaded anywhere.</p>

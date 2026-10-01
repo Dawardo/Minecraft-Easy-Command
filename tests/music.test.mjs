@@ -4,26 +4,32 @@ import { chromium } from 'playwright';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { midiFile, MELODY, BASS } from './make-test-song.mjs';
+import { midiFile, MELODY } from './make-test-song.mjs';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const webDir = path.join(root, 'web');
 const out = path.join(root, 'tests/out'); fs.mkdirSync(out, { recursive: true });
 
-// 120 bpm => 1 beat = 0.5 s. Melody: one note at a time (like a vocal/trombone line).
-// Bass only starts at beat 8 (4 s), like an intro without bass. Guitar strums 3-note chords.
-const tunes = MELODY.map((m, k) => ({ beat: k, beats: 1, midi: m })).filter(n => n.midi > 0);
-const midiPath = path.join(out, 'test-song.mid');
-fs.writeFileSync(midiPath, midiFile([
-  { name: 'Vocal line', channel: 0, notes: tunes },
-  { name: 'Bass', channel: 1, notes: BASS.map((m, k) => ({ beat: 8 + k * 2, beats: 2, midi: m })) },
-  { name: 'Guitar', channel: 2, notes: MELODY.flatMap((_, k) => [55, 60, 64].map(m => ({ beat: k, beats: 1, midi: m }))) },
-  { name: 'Drums', channel: 9, notes: MELODY.map((_, k) => ({ beat: k, beats: 0.5, midi: k % 2 ? 38 : 36 })) },
-]));
-// A piano part with chords in one track (melody should take the top note).
-const chordPath = path.join(out, 'chords.mid');
-fs.writeFileSync(chordPath, midiFile([
-  { name: 'Piano', channel: 0, notes: tunes.flatMap(n => [n, { ...n, midi: n.midi - 5 }, { ...n, midi: n.midi - 12 }]) },
+// A band-style MIDI like real downloads (120 bpm, 1 beat = 0.5 s, 40 beats):
+// - "Trombone": the sung tune, every note doubled an octave down (beats 0-15 and 24-39), resting in 16-23
+// - "Flute": a short fill while the tune rests (beats 16-23)
+// - "Bass": only starts at beat 16 (8 s)
+// - "Guitar": strummed 3-note chords on every beat
+// - "Drums": everywhere except a break in beats 16-23
+const tune = MELODY.map((m, k) => ({ k, m })).filter(n => n.m > 0);
+const lead = [...tune, ...tune.map(n => ({ ...n, k: n.k + 24 }))]
+  .flatMap(n => [{ beat: n.k, beats: 1, midi: n.m }, { beat: n.k, beats: 1, midi: n.m - 12 }]);
+const flute = [88, 86, 84, 83, 81, 79, 77, 76].map((m, i) => ({ beat: 16 + i, beats: 1, midi: m }));
+const bass = Array.from({ length: 12 }, (_, i) => ({ beat: 16 + i * 2, beats: 2, midi: [36, 41, 43][i % 3] }));
+const guitar = Array.from({ length: 40 }, (_, k) => [55, 60, 64].map(m => ({ beat: k, beats: 1, midi: m }))).flat();
+const drums = Array.from({ length: 40 }, (_, k) => k).filter(k => k < 16 || k >= 24).map(k => ({ beat: k, beats: 0.5, midi: k % 2 ? 38 : 36 }));
+const songPath = path.join(out, 'band-song.mid');
+fs.writeFileSync(songPath, midiFile([
+  { name: 'Trombone', channel: 0, notes: lead },
+  { name: 'Flute', channel: 3, notes: flute },
+  { name: 'Bass', channel: 1, notes: bass },
+  { name: 'Guitar', channel: 2, notes: guitar },
+  { name: 'Drums', channel: 9, notes: drums },
 ]));
 
 const server = http.createServer((req, res) => {
@@ -44,102 +50,115 @@ const errors = [];
 page.on('pageerror', e => errors.push(e.message));
 await page.goto(url);
 
-async function load(file) {
-  await page.setInputFiles('#file', file);
-  await page.waitForFunction(n => document.querySelector('#dropText').textContent.includes(n), path.basename(file));
+const version = () => page.evaluate(() => MM.state.version);
+/** Do something in the settings panel and wait for the result to update by itself (no Convert button). */
+async function change(action) {
+  const v = await version();
+  await action();
+  await page.waitForFunction(x => MM.state.version > x, v, { timeout: 5000 });
+  return page.evaluate(() => ({
+    rows: MM.state.song.rows, steps: MM.state.steps, tracks: MM.state.tracks,
+    warn: [...document.querySelectorAll('.warnline')].map(e => e.textContent),
+  }));
 }
-async function convert() {
-  await page.evaluate(() => (document.querySelector('#status').textContent = ''));
-  await page.click('#convert');
-  await page.waitForFunction(() => /Done/.test(document.querySelector('#status').textContent));
-  return page.evaluate(() => ({ rows: MM.state.song.rows, steps: MM.state.steps, warn: [...document.querySelectorAll('.warnline')].map(e => e.textContent) }));
-}
-const layerRows = (rows, l) => rows.filter(x => x.events.some(e => e.layer === l));
+const on = (rows, f) => rows.filter(x => x.events.some(f));
+let names = {};
+const trackName = idx => names[idx];
+/** Pick a track in a "Notes from" list by its name. */
+const pickTrack = (sel, name) => page.evaluate(([sel, name]) => {
+  const el = document.querySelector(sel);
+  el.value = [...el.options].find(o => o.textContent.startsWith(name)).value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}, [sel, name]);
+const setNum = (sel, v) => change(async () => { await page.fill(sel, String(v)); await page.locator(sel).dispatchEvent('change'); });
 
-// ---- track auto-pick ----
-await load(midiPath);
-const picked = sel => page.locator(`#midiTracks select[data-pick=${sel}] option:checked`).textContent();
-check((await picked('mel')).startsWith('Vocal line'), 'melody track auto-picked (highest busy track)');
-check((await picked('bass')).startsWith('Bass'), 'bass track auto-picked');
-check((await picked('harmony')).startsWith('Auto'), 'harmony defaults to Auto (chords from the other tracks)');
-check(await page.locator('#inst3').inputValue() === 'note.guitar', 'harmony instrument defaults to guitar (sits under the tune)');
+// ---- 1. drop the file: everything appears automatically ----
+let r = await change(() => page.setInputFiles('#file', songPath));
+names = await page.evaluate(() => Object.fromEntries(MM.state.midi.tracks.map(t => [t.idx, t.name])));
+check(Object.values(names).join() === 'Trombone,Flute,Bass,Guitar,Drums', 'all 5 tracks read');
+check(r.rows.length > 0, 'commands appear as soon as the file is dropped (no button)');
+check(await page.locator('#src1 option').first().textContent().then(t => t.includes('Trombone')), 'auto melody = the octave-doubled lead line (Trombone), not the flute or chords');
+check(await page.locator('#on2').isChecked() && await page.locator('#on3').isChecked(), 'all layers start ON');
+check(await page.locator('#state2').textContent() === 'ON', 'layer state shown in words');
 
-// ---- ALL layers on, intro part where the bass is silent (the bug report) ----
-await page.click('#mode2 [data-v=bass]');
-await page.click('#mode3 [data-v=harmony]');
-await page.fill('#start', '0'); await page.fill('#length', '3.9');
-let r = await convert();
-check(layerRows(r.rows, 0).length === 7, 'intro: 7 melody notes');
-check(layerRows(r.rows, 0).every(x => x.events.some(e => e.layer === 2)) && layerRows(r.rows, 2).length === 8,
-  `intro: harmony under every melody note, plus the guitar strum in the rest (${layerRows(r.rows, 2).length})`);
-check(r.rows.every(x => x.events.filter(e => e.layer === 2).every(h => {
-  const m = x.events.find(e => e.layer === 0);
-  return !m || h.src === undefined || h.src < m.src;
-})), 'harmony notes are below the melody');
-check(r.warn.some(w => /Bass: no notes/.test(w) && /starts at 4\.0 s/.test(w)), 'intro: clear warning that the bass only starts at 4.0 s');
-
-// ---- whole song: every layer plays ----
-await page.fill('#length', '30');
-r = await convert();
-const melSrc = layerRows(r.rows, 0).map(x => x.events.find(e => e.layer === 0).src);
-check(JSON.stringify(melSrc) === JSON.stringify(MELODY.filter(m => m > 0)), 'melody notes exact');
-check(layerRows(r.rows, 1).length === BASS.length, 'every bass note');
-check(layerRows(r.rows, 2).length >= 14, 'harmony on the beats');
-check(r.warn.length === 0, 'no warnings when every layer has notes');
+// whole song
+r = await setNum('#length', 25);
+const mel = r.tracks.mel, melRows = on(r.rows, e => e.layer === 0);
+check(melRows.length > 0 && on(r.rows, e => e.layer === 1).length > 0 && on(r.rows, e => e.layer === 2 && e.drum).length > 0 && on(r.rows, e => e.layer === 2 && !e.drum).length > 0,
+  `all layers play: melody ${melRows.length}, bass ${on(r.rows, e => e.layer === 1).length}, drums ${on(r.rows, e => e.layer === 2 && e.drum).length}, harmony ${on(r.rows, e => e.layer === 2 && !e.drum).length}`);
+const tuneSteps = melRows.filter(x => x.time < 8).map(x => x.events.find(e => e.layer === 0).orig);
+check(JSON.stringify(tuneSteps) === JSON.stringify(MELODY.filter(m => m > 0)), 'melody = the top note of the octave-doubled lead, exactly');
+check(mel.some(n => trackName(n.track) === 'Flute') && !mel.some(n => trackName(n.track) === 'Guitar'), 'while the lead rests the flute takes over (never the chord guitar)');
+const bassNotes = r.tracks.bass;
+check(bassNotes.filter(n => n.t >= 8).every(n => trackName(n.track) === 'Bass'), 'bass uses the Bass track wherever it plays');
+check(bassNotes.some(n => n.t < 4 && trackName(n.track) === 'Guitar') && !bassNotes.some(n => trackName(n.track) === 'Trombone'), 'intro without bass: low guitar notes fill in (never the tune)');
+const harmRows = on(r.rows, e => e.layer === 2 && !e.drum);
+check(harmRows.every(x => x.time > 8.4 && x.time < 11.6), 'auto layer 3: harmony only fills the drum break');
+check(r.rows.every(x => x.events.filter(e => e.layer === 2).length <= 1), 'never a drum and a harmony block in the same column');
+check(r.rows.every(x => x.events.filter(e => e.layer === 2 && !e.drum).every(h => { const m = x.events.find(e => e.layer === 0); return !m || h.orig < m.orig; })), 'harmony sits below the melody');
+check(r.warn.length === 0, 'no warnings in auto mode');
 check(r.rows.every(x => x.events.length <= 3), 'max 3 command blocks per step');
-check(r.rows.slice(1).every(x => x.waitTicks === 5 || x.waitTicks === 10), '120 bpm beats = 5 repeater ticks');
-
+check(r.rows.slice(1).every(x => x.waitTicks % 5 === 0), '120 bpm beats = 5 repeater ticks');
 const cmds = r.rows.flatMap(x => x.events.map(e => e.cmd));
 const re = /^\/playsound note\.[a-z_]+ @a ~ ~ ~ [\d.]+ ([\d.]+) [\d.]+$/;
 check(cmds.every(c => re.test(c)), 'every command is a Bedrock /playsound with volume, pitch and min volume');
 check(cmds.every(c => { const p = +c.match(re)[1]; return p >= 0.5 && p <= 2; }), 'every pitch is in the note block range 0.5–2.0');
-const melPlayed = layerRows(r.rows, 0).map(x => x.events.find(e => e.layer === 0).midi);
-const shape = a => a.slice(1).map((m, i) => m - a[i]);
-check(JSON.stringify(shape(melPlayed)) === JSON.stringify(shape(melSrc)), 'tune keeps its exact shape after fitting to the harp range');
 
-// ---- drums ----
-await page.click('#mode3 [data-v=drums]');
-r = await convert();
-check(layerRows(r.rows, 2).map(x => x.events.find(e => e.layer === 2).drum).join() === MELODY.map((_, k) => (k % 2 ? 'snare' : 'kick')).join(), 'GM drums -> note.bd / note.snare');
+// ---- 2. instruments: every change shows up in the commands at once ----
+for (const [sel, inst, layer] of [['#inst1', 'note.flute', 0], ['#inst2', 'note.didgeridoo', 1], ['#inst3', 'note.pling', 2]]) {
+  r = await change(() => page.selectOption(sel, inst));
+  const ev = r.rows.flatMap(x => x.events).filter(e => e.layer === layer && !e.drum);
+  check(ev.length > 0 && ev.every(e => e.cmd.startsWith(`/playsound ${inst} `)), `${sel} -> ${inst}: all ${ev.length} blocks of that layer switch instantly`);
+}
 
-// ---- Auto bass in the intro: lowest note of the other tracks ----
-await page.selectOption('#midiTracks select[data-pick=bass]', 'auto');
-await page.fill('#length', '3.9');
-r = await convert();
-check(layerRows(r.rows, 1).length === 8 && r.warn.length === 0, `Auto bass fills the intro from the guitar (${layerRows(r.rows, 1).length}, ${r.warn})`);
+// ---- 3. picking tracks by hand (the swap that broke before) ----
+r = await change(() => pickTrack('#src1', 'Guitar'));
+check(on(r.rows, e => e.layer === 0).length > 0 && r.tracks.mel.every(n => trackName(n.track) === 'Guitar'), 'melody from Guitar: takes the top chord note');
+r = await change(() => pickTrack('#src2', 'Trombone'));
+check(r.tracks.bass.every(n => trackName(n.track) === 'Trombone') && on(r.rows, e => e.layer === 1).length > 0, 'bass from Trombone: works (bottom note)');
+r = await change(() => pickTrack('#src3', 'Flute'));
+check(r.tracks.harmony.every(n => trackName(n.track) === 'Flute'), 'harmony from Flute: works');
+r = await change(() => page.selectOption('#mode3', 'harmony'));
+check(on(r.rows, e => e.layer === 2 && e.drum).length === 0, 'Harmony only: no drums');
+r = await change(() => pickTrack('#src3', 'Bass'));
+r = await setNum('#start', 0); r = await setNum('#length', 3);
+check(r.warn.some(w => /Harmony/.test(w) && /“Bass” only starts at 8\.0 s/.test(w)), 'a hand-picked track that is silent explains why');
+r = await change(() => page.selectOption('#src1', 'auto'));
+r = await change(() => page.selectOption('#src2', 'auto'));
+r = await change(() => page.selectOption('#src3', 'auto'));
+r = await change(() => page.selectOption('#mode3', 'drums'));
+check(on(r.rows, e => e.layer === 2 && !e.drum).length === 0 && on(r.rows, e => e.drum).length > 0, 'Drums only: no harmony');
 
-// ---- copy next ----
+// ---- 4. switches ----
+r = await change(() => page.uncheck('#on2'));
+check(on(r.rows, e => e.layer === 1).length === 0 && await page.locator('#state2').textContent() === 'OFF', 'bass switch OFF removes bass and says OFF');
+r = await change(() => page.uncheck('#on3'));
+check(r.rows.every(x => x.events.length === 1), 'layer 3 OFF: melody only');
+r = await change(() => page.check('#on2'));
+r = await change(() => page.check('#on3'));
+r = await change(() => page.selectOption('#mode3', 'auto'));
+check(on(r.rows, e => e.layer === 1).length > 0 && on(r.rows, e => e.layer === 2).length > 0, 'switching back ON brings the layers back');
+
+// ---- 5. copy next + txt ----
 await page.click('#qCopy'); await page.click('#qCopy');
-const clip = await page.evaluate(() => navigator.clipboard.readText());
-check(clip === r.steps[1].cmd, 'Copy next copies blocks in build order');
+check(await page.evaluate(() => navigator.clipboard.readText()) === r.steps[1].cmd, 'Copy next copies blocks in build order');
 await page.keyboard.press('Space');
 check(await page.evaluate(() => MM.state.pos) === 3, 'Space copies the next block');
-check((await page.locator('#quick').textContent()).includes('First place repeater'), 'Copy next tells you the repeater delay');
-
-// ---- txt download ----
 const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#dlTxt')]);
 const txtPath = path.join(out, dl.suggestedFilename()); await dl.saveAs(txtPath);
-const txt = fs.readFileSync(txtPath, 'utf8');
-check(/repeaters \d/.test(txt) && txt.includes('/playsound note.harp'), 'txt download lists repeaters and commands');
+check(/repeaters \d/.test(fs.readFileSync(txtPath, 'utf8')), 'txt download lists repeaters and commands');
 
-// ---- chain mode, 2-tick grid, @p ----
-await page.click('#ticks [data-v="2"]');
-await page.click('#build [data-v=chain]');
-await page.selectOption('#target', 'p');
-r = await convert();
+// ---- 6. build style, grid, target ----
+r = await change(() => page.click('#build [data-v=chain]'));
 check(r.steps.slice(1).filter(s => s.ei === 0).every(s => s.how.includes(`Delay in Ticks: ${r.rows[s.row].waitTicks * 2}`)), 'chain mode: Delay in Ticks = 2 game ticks per repeater tick');
+r = await change(() => page.click('#ticks [data-v="2"]'));
+check(r.rows.slice(1).every(x => x.waitTicks % 2 === 0), '2-tick grid');
+r = await change(() => page.selectOption('#target', 'p'));
 check(r.rows.flatMap(x => x.events).every(e => / @p ~ ~ ~ [\d.]+ [\d.]+$/.test(e.cmd)), '@p target, no min volume');
+r = await setNum('#transpose', 2);
+check(r.rows.length > 0, 'transpose updates live');
 
-// ---- chords in one track: melody = top note ----
-await load(chordPath);
-await page.click('#mode2 [data-v=off]');
-await page.click('#mode3 [data-v=off]');
-await page.click('#ticks [data-v="1"]');
-await page.fill('#start', '0'); await page.fill('#length', '30');
-r = await convert();
-check(JSON.stringify(r.rows.map(x => x.events[0].src)) === JSON.stringify(MELODY.filter(m => m > 0)), 'chord track: melody takes the top note of each chord');
-
-// ---- not a MIDI file ----
+// ---- 7. not a MIDI file ----
 const bogus = path.join(out, 'not-midi.mid'); fs.writeFileSync(bogus, 'hello');
 await page.setInputFiles('#file', bogus);
 await page.waitForFunction(() => /Could not read/.test(document.querySelector('#status').textContent));

@@ -81,16 +81,19 @@ function buildSong(tracks, s) {
   };
   // chords (e.g. from a MIDI piano part): melody keeps the top note, bass the bottom note
   const byPitch = (notes, dir) => [...notes].sort((a, b) => a.t - b.t || dir * (a.midi - b.midi));
-  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, src: n.midi, vol: 1 });
-  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, vol: 0.9 });
-  if (s.mode3 === 'harmony') {
+  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 });
+  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 });
+  // layer 3: drums where the song has drums; harmony fills the rest (in "auto"), or one of them only
+  if (s.mode3 === 'drums' || s.mode3 === 'auto') {
+    for (const d of tracks.drums) put(2, d.t, { sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
+  }
+  if (s.mode3 === 'harmony' || s.mode3 === 'auto') {
     for (const n of fitToInstrument(byPitch(tracks.harmony, -1), s.inst3, s.transpose)) {
       const mel = steps.get(stepOf(n.t))?.find(e => e.layer === 0);
-      if (mel && (n.midi >= mel.src || (mel.src - n.midi) % 12 === 0)) continue; // harmony sits below the tune, not doubling it
-      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, vol: 0.7 });
+      if (mel && (n.midi >= mel.orig || (mel.orig - n.midi) % 12 === 0)) continue; // harmony sits below the tune, not doubling it
+      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 });
     }
   }
-  if (s.mode3 === 'drums') for (const d of tracks.drums) put(2, d.t, { sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
 
   const keys = [...steps.keys()].sort((a, b) => a - b);
   let prev = null;
@@ -199,16 +202,19 @@ function playOriginal() {
 }
 
 // ---------- UI ----------
-const state = { midi: null, fileName: '', song: null, steps: [], pos: 0, settings: null };
+const state = { midi: null, fileName: '', song: null, steps: [], pos: 0, settings: null, version: 0 };
 
 function segValue(id) { return $(`#${id} button.active`).dataset.v; }
 function readSettings() {
+  const src = id => ($(id).value === 'auto' ? 'auto' : +$(id).value);
   return {
     start: Math.max(0, +$('#start').value || 0),
     length: Math.max(1, +$('#length').value || 20),
     ticks: +segValue('ticks'),
     inst1: $('#inst1').value, inst2: $('#inst2').value, inst3: $('#inst3').value,
-    mode2: segValue('mode2'), mode3: segValue('mode3'),
+    src1: src('#src1'), src2: src('#src2'), src3: src('#src3'),
+    mode2: $('#on2').checked ? 'bass' : 'off',
+    mode3: $('#on3').checked ? $('#mode3').value : 'off',
     transpose: Math.max(-12, Math.min(12, Math.round(+$('#transpose').value || 0))),
     target: $('#target').value,
     build: segValue('build'),
@@ -223,11 +229,16 @@ function fillInstruments() {
   $('#inst3').innerHTML = opts('note.guitar', all);
   syncLayers();
 }
+/** Grey out what a switched-off layer doesn't use, and show ON/OFF in words. */
 function syncLayers() {
-  $('#inst2').disabled = segValue('mode2') === 'off';
-  const m3 = segValue('mode3');
-  $('#inst3').disabled = m3 !== 'harmony';
-  $('#inst3').title = m3 === 'drums' ? 'Drums use note.bd (kick), note.snare and note.hat' : '';
+  const on2 = $('#on2').checked, on3 = $('#on3').checked, m3 = $('#mode3').value;
+  $$('#layer2 select').forEach(e => (e.disabled = !on2));
+  $('#mode3').disabled = !on3;
+  $$('#layer3 .harm').forEach(e => (e.disabled = !on3 || m3 === 'drums'));
+  $('#state2').textContent = on2 ? 'ON' : 'OFF';
+  $('#state3').textContent = on3 ? 'ON' : 'OFF';
+  $('#state2').classList.toggle('off', !on2);
+  $('#state3').classList.toggle('off', !on3);
 }
 
 // General MIDI drum notes -> Minecraft drum sounds
@@ -237,62 +248,107 @@ function gmDrum(n) {
   return 'hat'; // hi-hats, cymbals, shakers…
 }
 
+const ACTIVE_WINDOW = 1.5; // seconds: a track counts as "playing" if it has a note this close
+/** Does this track play around time t? (binary search over sorted note times) */
+function playsAt(track, t, win = ACTIVE_WINDOW) {
+  const a = track.times;
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < t - win) lo = mid + 1; else hi = mid; }
+  return lo < a.length && a[lo] <= t + win;
+}
+
 function loadMidi(data, name) {
   const midi = new window.ToneMidi.Midi(data);
-  const tracks = midi.tracks.map((t, idx) => ({
-    idx, notes: t.notes, drums: t.instrument.percussion || t.channel === 9,
-    name: (t.name || t.instrument.name || `Track ${idx + 1}`).trim(),
-    avg: t.notes.reduce((a, n) => a + n.midi, 0) / (t.notes.length || 1),
-    first: t.notes.length ? Math.min(...t.notes.map(n => n.time)) : 0,
-  })).filter(t => t.notes.length);
+  const tracks = midi.tracks.map((t, idx) => {
+    const notes = [...t.notes].sort((a, b) => a.time - b.time || b.midi - a.midi);
+    // group notes that start together; a lead line has one voice per group
+    // (the same note doubled in octaves still counts as one voice)
+    const groups = [];
+    for (const n of notes) {
+      const g = groups[groups.length - 1];
+      if (g && n.time - g.t < 0.03) g.p.push(n.midi); else groups.push({ t: n.time, p: [n.midi] });
+    }
+    const oneVoice = groups.filter(g => g.p.every(m => (m - g.p[0]) % 12 === 0)).length;
+    return {
+      idx, notes, times: notes.map(n => n.time), drums: t.instrument.percussion || t.channel === 9,
+      name: (t.name || t.instrument.name || `Track ${idx + 1}`).trim(),
+      avg: notes.reduce((a, n) => a + n.midi, 0) / (notes.length || 1),
+      top: groups.reduce((a, g) => a + Math.max(...g.p), 0) / (groups.length || 1),
+      onsets: groups.length,
+      mono: oneVoice / (groups.length || 1),
+      first: notes.length ? notes[0].time : 0,
+      last: notes.length ? notes[notes.length - 1].time : 0,
+    };
+  }).filter(t => t.notes.length);
   if (!tracks.some(t => !t.drums)) throw new Error('that MIDI file has no melody notes');
   const tonal = tracks.filter(t => !t.drums);
-  const most = Math.max(...tonal.map(t => t.notes.length), 1);
-  const busy = tonal.filter(t => t.notes.length >= most * 0.2);
-  const melody = [...busy].sort((a, b) => b.avg - a.avg)[0] || tonal[0];
-  const bassTrack = tonal.filter(t => t !== melody && (/bass/i.test(t.name) || t.avg < 48)).sort((a, b) => a.avg - b.avg)[0];
-  state.midi = { midi, tracks, pick: { mel: melody.idx, bass: bassTrack ? bassTrack.idx : 'auto', harmony: 'auto' } };
+  const most = Math.max(...tonal.map(t => t.onsets), 1);
+  const isBass = t => /bass/i.test(t.name) || t.avg < 45;
+  // lead ranking: busy, one-voice, higher-pitched tracks first; chord parts last
+  const leadRank = tonal.filter(t => !isBass(t))
+    .map(t => ({ t, score: t.onsets / most + 1.5 * t.mono + (t.top - 55) / 20 + (/vocal|voice|melody|lead|sing/i.test(t.name) ? 2 : 0) }))
+    .sort((a, b) => b.score - a.score).map(x => x.t);
+  const bassRank = tonal.filter(isBass).sort((a, b) => a.avg - b.avg);
+  state.midi = { midi, tracks, tonal, leadRank: leadRank.length ? leadRank : tonal, bassRank };
   state.fileName = name;
-  renderMidiTracks();
+  renderSources();
   $('#drop').classList.add('loaded');
   $('#dropText').innerHTML = `&#127929; <b>${esc(name)}</b>`;
-  $('#songInfo').textContent = `Song length: ${fmtTime(midi.duration)}. ${tracks.length} tracks. Every note becomes a command block, so start with 10–30 seconds.`;
-  $('#length').value = Math.min(+$('#length').value || 20, Math.ceil(midi.duration));
-  $('#convert').disabled = false;
+  const lead = state.midi.leadRank[0];
+  $('#songInfo').textContent = `Song length: ${fmtTime(midi.duration)} · ${tracks.length} tracks · tune starts at ${fmtTime(lead.first)}.`;
+  // start where the tune starts, 20 seconds
+  $('#start').value = Math.floor(lead.first);
+  $('#length').value = Math.min(20, Math.max(1, Math.ceil(midi.duration - Math.floor(lead.first))));
   $('#status').textContent = '';
+  convert();
 }
 
-function renderMidiTracks() {
+function renderSources() {
   const m = state.midi;
-  const opts = (sel, auto) => (auto ? `<option value="auto" ${sel === 'auto' ? 'selected' : ''}>${auto}</option>` : '') +
-    m.tracks.filter(t => !t.drums).map(t =>
-      `<option value="${t.idx}" ${t.idx === sel ? 'selected' : ''}>${esc(t.name)} · ${t.notes.length} notes · from ${fmtTime(t.first)}</option>`).join('');
+  const opts = (auto, list) => `<option value="auto" selected>${auto}</option>` +
+    list.map(t => `<option value="${t.idx}">${esc(t.name)} · ${t.notes.length} notes · ${fmtTime(t.first)}–${fmtTime(t.last)}</option>`).join('');
+  const lead = m.leadRank[0], bass = m.bassRank[0];
+  $('#src1').innerHTML = opts(`Auto (${esc(lead.name)}, others when it rests)`, m.tonal);
+  $('#src2').innerHTML = opts(`Auto (${bass ? esc(bass.name) + ', ' : ''}lowest notes when it rests)`, m.tonal);
+  $('#src3').innerHTML = opts('Auto (chord notes from the other tracks)', m.tonal);
   const drums = m.tracks.filter(t => t.drums);
-  $('#midiTracks').innerHTML = `
-    <label>Melody comes from</label><select data-pick="mel">${opts(m.pick.mel)}</select>
-    <label>Bass comes from</label><select data-pick="bass">${opts(m.pick.bass, 'Auto: lowest note of all other tracks')}</select>
-    <label>Harmony comes from</label><select data-pick="harmony">${opts(m.pick.harmony, 'Auto: chord notes from all other tracks')}</select>
-    <div class="hint">${drums.length ? `Drums: ${drums.map(t => `${esc(t.name)} (from ${fmtTime(t.first)})`).join(', ')}` : 'No drum track in this file.'}</div>`;
-  $$('#midiTracks [data-pick]').forEach(sel => (sel.onchange = () => (m.pick[sel.dataset.pick] = sel.value === 'auto' ? 'auto' : +sel.value)));
+  $('#drumInfo').textContent = drums.length
+    ? `Drum track: ${drums.map(t => `${t.name} (${fmtTime(t.first)}–${fmtTime(t.last)})`).join(', ')}`
+    : 'This file has no drum track, so layer 3 plays harmony.';
 }
 
-/** Notes for each layer in the chosen part of the song (times relative to the start). */
+/** Notes for each layer in the chosen part of the song (times relative to the start), with automatic track choice. */
 function midiTracks(s) {
   const m = state.midi, end = s.start + s.length;
   const inRange = n => n.time >= s.start - 1e-6 && n.time < end;
-  const conv = n => ({ t: n.time - s.start, dur: n.duration, midi: n.midi });
-  const tonal = m.tracks.filter(t => !t.drums);
-  const from = (pick, exclude) => (pick === 'auto' ? tonal.filter(t => !exclude.includes(t.idx)) : tonal.filter(t => t.idx === pick))
-    .flatMap(t => t.notes.filter(inRange).map(conv));
-  const drums = m.tracks.filter(t => t.drums).flatMap(t => t.notes).filter(inRange)
+  const conv = (n, t) => ({ t: n.time - s.start, dur: n.duration, midi: n.midi, track: t.idx });
+  const byIdx = idx => m.tracks.find(t => t.idx === idx);
+  const notesOf = t => t.notes.filter(inRange).map(n => conv(n, t));
+  // ranked tracks: use a lower-ranked track only while every higher-ranked one is resting
+  const ranked = list => list.flatMap((t, r) => notesOf(t).filter(n => !list.slice(0, r).some(u => playsAt(u, n.t + s.start))));
+  const leadAt = time => m.leadRank.find(u => playsAt(u, time));
+
+  const mel = s.src1 === 'auto' ? ranked(m.leadRank) : notesOf(byIdx(s.src1));
+  let bass;
+  if (s.src2 !== 'auto') bass = notesOf(byIdx(s.src2));
+  else {
+    bass = ranked(m.bassRank);
+    // no bass track for a while (intro, breaks, or no bass track at all): use the lowest notes of the
+    // chord/backing parts, never a tune-like line
+    const backing = m.tonal.filter(t => !m.bassRank.includes(t) && t.mono < 0.7 && (s.src1 === 'auto' || t.idx !== s.src1))
+      .flatMap(t => notesOf(t).filter(n => !m.bassRank.some(u => playsAt(u, n.t + s.start, 4)) && (s.src1 !== 'auto' || leadAt(n.t + s.start) !== t)));
+    bass = bass.concat(backing);
+  }
+  const harmony = s.src3 !== 'auto' ? notesOf(byIdx(s.src3))
+    : m.tonal.filter(t => !m.bassRank.includes(t))
+      .flatMap(t => notesOf(t).filter(n => (s.src1 === 'auto' ? leadAt(n.t + s.start) !== t : t.idx !== s.src1)));
+  const drumTracks = m.tracks.filter(t => t.drums);
+  const drums = drumTracks.flatMap(t => t.notes).filter(inRange)
     .map(n => ({ t: n.time - s.start, kind: gmDrum(n.midi) }))
     .sort((a, b) => a.t - b.t || ['kick', 'snare', 'hat'].indexOf(a.kind) - ['kick', 'snare', 'hat'].indexOf(b.kind));
-  return {
-    mel: from(m.pick.mel, []),
-    bass: from(m.pick.bass, [m.pick.mel]),
-    harmony: from(m.pick.harmony, [m.pick.mel, m.pick.bass]),
-    drums,
-  };
+  // auto layer 3: harmony only where the drums are resting
+  const harm = s.mode3 === 'auto' ? harmony.filter(n => !drumTracks.some(t => playsAt(t, n.t + s.start))) : harmony;
+  return { mel, bass, harmony: harm, drums };
 }
 
 async function loadFile(file) {
@@ -308,6 +364,7 @@ async function loadFile(file) {
 
 function convert() {
   if (!state.midi) return;
+  syncLayers();
   const s = readSettings();
   const dur = state.midi.midi.duration;
   if (s.start >= dur) { $('#status').textContent = `Start is past the end of the song (${fmtTime(dur)}).`; return; }
@@ -317,26 +374,28 @@ function convert() {
   state.song = buildSong(state.tracks, s);
   state.steps = buildSteps(state.song);
   state.pos = 0;
-  $('#status').textContent = 'Done.';
+  state.version++;
+  $('#status').textContent = `Updated (${state.steps.length} command blocks).`;
   renderResult();
 }
 
-/** Why an enabled layer came out empty, in plain words. */
+/** Plain-words reasons for an empty layer. */
 function layerWarnings(s) {
-  const m = state.midi, warn = [];
-  const count = l => state.song.rows.filter(r => r.events.some(e => e.layer === l)).length;
-  const range = `${s.start}–${(s.start + s.length).toFixed(1)} s`;
-  const why = pick => {
-    if (pick === 'auto') return 'none of the other tracks play here';
-    const t = m.tracks.find(x => x.idx === pick);
-    return t.first >= s.start + s.length ? `“${t.name}” only starts at ${t.first.toFixed(1)} s` : `“${t.name}” is silent here`;
+  const m = state.midi, warn = [], end = s.start + s.length;
+  const count = (l, f = () => true) => state.song.rows.filter(r => r.events.some(e => e.layer === l && f(e))).length;
+  const range = `${s.start}–${end.toFixed(1)} s`;
+  const why = idx => {
+    const t = m.tracks.find(x => x.idx === idx);
+    if (t.first >= end) return `“${t.name}” only starts at ${t.first.toFixed(1)} s`;
+    if (t.last < s.start) return `“${t.name}” stops at ${t.last.toFixed(1)} s`;
+    return `“${t.name}” is resting in this part`;
   };
-  if (!count(0)) warn.push(`Melody: no notes in ${range} (${why(m.pick.mel)}).`);
-  if (s.mode2 === 'bass' && !count(1)) warn.push(`Bass: no notes in ${range} (${why(m.pick.bass)}). Try “Auto” or a later part of the song.`);
-  if (s.mode3 === 'harmony' && !count(2)) warn.push(`Harmony: nothing under the melody in ${range} (${why(m.pick.harmony)}). Try “Auto”.`);
+  if (!count(0)) warn.push(`Melody: no notes in ${range}${s.src1 === 'auto' ? ' (no track plays here)' : ` (${why(s.src1)}; try Auto)`}.`);
+  if (s.mode2 === 'bass' && !count(1)) warn.push(`Bass: no notes in ${range}${s.src2 === 'auto' ? ' (nothing plays under the tune here)' : ` (${why(s.src2)}; try Auto)`}.`);
+  if (s.mode3 === 'harmony' && !count(2)) warn.push(`Harmony: nothing under the melody in ${range}${s.src3 === 'auto' ? '' : ` (${why(s.src3)}; try Auto)`}.`);
   if (s.mode3 === 'drums' && !count(2)) {
     const d = m.tracks.filter(t => t.drums);
-    warn.push(`Drums: no hits in ${range}${d.length ? ` (drums start at ${Math.min(...d.map(t => t.first)).toFixed(1)} s)` : ' (this MIDI has no drum track)'}.`);
+    warn.push(d.length ? `Drums: the drum track is silent in ${range}. Pick “Auto” to fill it with harmony.` : 'Drums: this MIDI has no drum track. Pick “Auto” or “Harmony”.');
   }
   return warn;
 }
@@ -345,11 +404,20 @@ function renderResult() {
   const song = state.song, s = song.settings;
   const blocks = state.steps.length;
   const repeaterCount = song.rows.reduce((a, r) => a + repeaters(r.waitTicks).length, 0);
-  const n = l => song.rows.filter(r => r.events.some(e => e.layer === l)).length;
+  const n = (l, f = () => true) => song.rows.filter(r => r.events.some(e => e.layer === l && f(e))).length;
+  const used = layer => { // which tracks a layer's notes came from
+    const c = {};
+    for (const nt of state.tracks[layer]) c[nt.track] = (c[nt.track] || 0) + 1;
+    return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => state.midi.tracks.find(t => t.idx === +i)?.name).join(', ');
+  };
+  const drumsN = n(2, e => e.drum), harmN = n(2, e => !e.drum);
   const layers = [
-    `Melody: ${INSTRUMENTS[s.inst1].label} (${n(0)} notes)`,
-    s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label} (${n(1)} notes)` : null,
-    s.mode3 === 'drums' ? `Drums: kick / snare / hat (${n(2)} hits)` : s.mode3 === 'harmony' ? `Harmony: ${INSTRUMENTS[s.inst3].label} (${n(2)} notes)` : null,
+    `Melody: ${INSTRUMENTS[s.inst1].label} · ${n(0)} notes${used('mel') ? ` from ${used('mel')}` : ''}`,
+    s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label} · ${n(1)} notes${used('bass') ? ` from ${used('bass')}` : ''}` : null,
+    s.mode3 === 'off' ? null : [
+      s.mode3 !== 'harmony' ? `Drums · ${drumsN} hits` : '',
+      s.mode3 !== 'drums' ? `Harmony: ${INSTRUMENTS[s.inst3].label} · ${harmN} notes` : '',
+    ].filter(Boolean).join(' + '),
   ];
   const warnings = layerWarnings(s);
   const chain = s.build === 'chain';
@@ -366,7 +434,7 @@ function renderResult() {
       <canvas class="roll" id="roll"></canvas>
       <div class="legend-row">${layers.map((l, i) => l ? `<span><i class="swatch" style="background:${LAYER_COLORS[i]}"></i>${esc(l)}</span>` : '').join('')}</div>
       ${warnings.map(w => `<p class="warnline">&#9888; ${esc(w)}</p>`).join('')}
-      ${blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part, "Simple tune", or the 2-tick grid.</p>` : ''}
+      ${blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part or the 2-tick grid.</p>` : ''}
     </div>
 
     <div class="card">
@@ -498,17 +566,22 @@ function downloadTxt() {
 
 function init() {
   fillInstruments();
+  let timer = null;
+  const live = (delay = 0) => { clearTimeout(timer); timer = setTimeout(convert, delay); };
   $$('.seg').forEach(seg => seg.addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     seg.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
-    syncLayers();
+    live();
   }));
+  // every setting updates the result straight away
+  const panel = $('.m-settings');
+  panel.addEventListener('change', e => { if (e.target.id !== 'file') { syncLayers(); live(); } });
+  panel.addEventListener('input', e => { if (e.target.type === 'number') live(400); });
   $('#file').onchange = e => loadFile(e.target.files[0]);
   const drop = $('#drop');
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));
   drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); loadFile(e.dataTransfer.files[0]); });
-  $('#convert').onclick = convert;
   $('#result').addEventListener('click', e => {
     const b = e.target.closest('[data-copy]');
     if (b) { copyText(b.dataset.copy); toast('Copied!'); }
@@ -522,5 +595,5 @@ function init() {
 }
 
 // exposed for automated tests
-window.MM = { state, buildSong, buildSteps, repeaters, fitToInstrument, midiTracks, INSTRUMENTS };
+window.MM = { state, buildSong, buildSteps, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
 init();
