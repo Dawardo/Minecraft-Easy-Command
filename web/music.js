@@ -25,6 +25,17 @@ const INSTRUMENTS = {
   'note.didgeridoo': { label: 'Didgeridoo', center: 42, synth: 'bass' },
 };
 const DRUMS = { kick: 'note.bd', snare: 'note.snare', hat: 'note.hat' };
+const HOLD_MIN = 0.4, HOLD_EVERY = 0.2;   // "Hold long notes": notes this long (s) are replayed this often (s)
+// "Every note": instruments that together cover MIDI 30..102 (F#1..F#7) at exact pitch, two octaves each
+const COVER = ['note.harp', 'note.bass', 'note.guitar', 'note.flute', 'note.bell'];
+/** The first instrument (yours first, then COVER) whose two octaves hold this note, so it plays at its real pitch.
+ *  Only notes outside every range (below F#1, above F#7) move by octaves. */
+function exactInstrument(m, prefs) {
+  while (m < 30) m += 12;
+  while (m > 102) m -= 12;
+  const sound = [...prefs, ...COVER].find(k => Math.abs(m - INSTRUMENTS[k].center) <= 12);
+  return { sound, midi: m, pitch: Math.pow(2, (m - INSTRUMENTS[sound].center) / 12) };
+}
 const LAYER_COLORS = ['#5dbb63', '#5a9be5', '#e0b341'];
 
 // ---------- helpers ----------
@@ -70,20 +81,53 @@ function fitToInstrument(notes, inst, transpose) {
 }
 
 function buildSong(tracks, s) {
-  const stepSec = s.ticks * 0.1;
+  // Game ticks per step. Repeaters and chain delays are tied to the repeater grid (1 repeater tick =
+  // 2 game ticks), but in the slab every block has its own Delay in Ticks, so it can use single game
+  // ticks: 0.05 s, half the error of the finest repeater grid.
+  const stepTicks = s.build === 'slab' ? 1 : s.ticks * 2;
+  const stepSec = stepTicks / 20;
   const steps = new Map();
   const stepOf = t => Math.max(0, Math.round(t / stepSec));
-  const put = (layer, t, ev) => {
+  const holds = [];   // long notes to replay ("Hold long notes"), added after every real note
+  const hold = (layer, t, dur, ev) => { if (s.hold && dur >= HOLD_MIN) holds.push({ layer, t, dur, ev }); };
+  const put = (layer, t, ev, dur = 0) => {
     const k = stepOf(t);
     if (!steps.has(k)) steps.set(k, []);
     const row = steps.get(k);
     if (row.some(e => e.layer === layer)) return; // one block per layer per step (first one wins)
     row.push({ layer, ...ev });
+    hold(layer, t, dur, ev);
   };
   // chords (e.g. from a MIDI piano part): melody keeps the top note, bass the bottom note
   const byPitch = (notes, dir) => [...notes].sort((a, b) => a.t - b.t || dir * (a.midi - b.midi));
-  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 });
-  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 });
+  if (s.detail === 'full') {
+    // Every note: each note of every track at its exact pitch (only exact repeats on the same tick merge).
+    // Layer = colour only: 0 = notes from F#3 up, 1 = low notes, 2 = drums. The top note of a chord is loudest.
+    const prefs = [s.inst1, ...(s.mode2 === 'bass' ? [s.inst2] : []), s.inst3];
+    const top = new Map();
+    for (const n of tracks.all) top.set(stepOf(n.t), Math.max(top.get(stepOf(n.t)) ?? -1, n.midi));
+    for (const n of tracks.all) {
+      const m = n.midi + s.transpose;
+      if (m < 54 && s.mode2 !== 'bass') continue;   // bass switched off: no low notes
+      const p = exactInstrument(m, prefs), k = stepOf(n.t);
+      if (!steps.has(k)) steps.set(k, []);
+      const row = steps.get(k);
+      if (row.some(e => e.sound === p.sound && e.midi === p.midi)) continue;
+      const ev = { layer: m < 54 ? 1 : 0, ...p, orig: n.midi, vol: n.midi === top.get(k) ? 1 : m < 54 ? 0.9 : 0.75 };
+      row.push(ev);
+      hold(ev.layer, n.t, n.dur, ev);
+    }
+    if (s.mode3 === 'drums' || s.mode3 === 'auto') {
+      for (const d of tracks.drums) {
+        const k = stepOf(d.t);
+        if (!steps.has(k)) steps.set(k, []);
+        if (steps.get(k).some(e => e.drum === d.kind)) continue;
+        steps.get(k).push({ layer: 2, sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
+      }
+    }
+  } else {
+  for (const n of fitToInstrument(byPitch(tracks.mel, -1), s.inst1, s.transpose)) put(0, n.t, { sound: s.inst1, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 1 }, n.dur);
+  if (s.mode2 === 'bass') for (const n of fitToInstrument(byPitch(tracks.bass, 1), s.inst2, s.transpose)) put(1, n.t, { sound: s.inst2, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.9 }, n.dur);
   // layer 3: drums where the song has drums; harmony fills the rest (in "auto"), or one of them only
   if (s.mode3 === 'drums' || s.mode3 === 'auto') {
     for (const d of tracks.drums) put(2, d.t, { sound: DRUMS[d.kind], pitch: 1, drum: d.kind, vol: d.kind === 'hat' ? 0.5 : 0.8 });
@@ -92,19 +136,31 @@ function buildSong(tracks, s) {
     for (const n of fitToInstrument(byPitch(tracks.harmony, -1), s.inst3, s.transpose)) {
       const mel = steps.get(stepOf(n.t))?.find(e => e.layer === 0);
       if (mel && (n.midi >= mel.orig || (mel.orig - n.midi) % 12 === 0)) continue; // harmony sits below the tune, not doubling it
-      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 });
+      put(2, n.t, { sound: s.inst3, pitch: n.pitch, midi: n.played, orig: n.midi, vol: 0.7 }, n.dur);
     }
   }
+  }
 
+  // Hold long notes: replay each long note every HOLD_EVERY s while it lasts, softer each time. Real notes
+  // were placed first, so a replay only goes where that layer (Simple) / that exact note (Every note) is free.
+  for (const h of holds) {
+    for (let i = 1, t = h.t + HOLD_EVERY; t < h.t + h.dur - 0.05; i++, t += HOLD_EVERY) {
+      const k = stepOf(t);
+      if (!steps.has(k)) steps.set(k, []);
+      const row = steps.get(k);
+      if (s.detail === 'full' ? row.some(e => e.sound === h.ev.sound && e.midi === h.ev.midi) : row.some(e => e.layer === h.layer)) continue;
+      row.push({ ...h.ev, layer: h.layer, vol: +(h.ev.vol * Math.max(0.5, 1 - 0.1 * i)).toFixed(2), hold: true });
+    }
+  }
   const keys = [...steps.keys()].sort((a, b) => a - b);
   let prev = null;
   const rows = keys.map(k => {
-    const events = steps.get(k).sort((a, b) => a.layer - b.layer);
-    const waitTicks = prev === null ? 0 : (k - prev) * s.ticks;
+    const events = steps.get(k).sort((a, b) => a.layer - b.layer || (b.midi ?? 0) - (a.midi ?? 0));
+    const waitTicks = prev === null ? 0 : (k - prev) * stepTicks / 2;   // repeater ticks (repeater and chain styles)
     prev = k;
     return { step: k, time: k * stepSec, waitTicks, events: events.map(e => ({ ...e, cmd: playsound(e, s) })) };
   });
-  return { rows, stepSec, settings: s };
+  return { rows, stepSec, stepTicks, settings: s };
 }
 
 function playsound(e, s) {
@@ -113,6 +169,9 @@ function playsound(e, s) {
   const tail = s.target === 'all' ? ` ${vol}` : ''; // minimumVolume: heard everywhere at this volume
   return `/playsound ${e.sound} ${target} ~ ~ ~ ${vol} ${fmtPitch(e.pitch)}${tail}`;
 }
+
+/** A step's time: 0.05 s steps (slab) need two decimals, 0.1 s steps one. */
+const fmtStepTime = (t, s) => t.toFixed(s.build === 'slab' ? 2 : 1);
 
 /** Repeater delays (1-4 redstone ticks each) adding up to `ticks`. */
 function repeaters(ticks) {
@@ -132,7 +191,7 @@ const MAX_DELAY = 99999;     // Bedrock command block "Delay in Ticks" limit
 function slabLayout(song) {
   const s = song.settings, { x, y, z, w, d } = s.slab;
   const first = song.rows.length ? song.rows[0].step : 0;
-  const notes = song.rows.flatMap(r => r.events.map(e => ({ cmd: e.cmd, delay: (r.step - first) * s.ticks * 2, time: r.time, layer: e.layer })));
+  const notes = song.rows.flatMap(r => r.events.map(e => ({ cmd: e.cmd, delay: (r.step - first) * song.stepTicks, time: r.time, layer: e.layer })));
   const per = w * d, layers = Math.max(1, Math.ceil(notes.length / per));
   const cmdY = k => y + Math.floor(k / 2) * 3 + (k % 2) * 2;
   const levels = [];
@@ -197,10 +256,158 @@ function buildSteps(song) {
   return list;
 }
 
+// ---------- snip editor: choose the part of the song on a timeline ----------
+const snip = { drag: null };
+const SNAP = 0.1;
+function snipRange() {
+  const s = Math.max(0, +$('#start').value || 0);
+  return [s, s + Math.max(1, +$('#length').value || 20)];
+}
+/** Draws the whole song (note density, tune in green), the chosen part, and the playhead. */
+function drawSnip() {
+  const cv = $('#snip');
+  if (!cv || !state.midi) return;
+  const dur = Math.max(1, state.midi.midi.duration);
+  const w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (!w) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement), col = n => css.getPropertyValue(n).trim();
+  g.fillStyle = col('--panel2'); g.fillRect(0, 0, w, h);
+  // note density per pixel column
+  const bins = Math.max(1, Math.floor(w)), all = new Float32Array(bins), tune = new Float32Array(bins);
+  const lead = state.midi.leadRank[0];
+  for (const t of state.midi.tracks) for (const n of t.notes) {
+    const b = Math.min(bins - 1, Math.floor((n.time / dur) * bins));
+    all[b]++; if (t === lead) tune[b]++;
+  }
+  let max = 1; for (const v of all) max = Math.max(max, v);
+  const barH = v => Math.sqrt(v / max) * (h - 16);
+  for (let i = 0; i < bins; i++) {
+    if (all[i]) { g.fillStyle = col('--muted'); g.globalAlpha = 0.45; g.fillRect(i, h - 14 - barH(all[i]), 1, barH(all[i])); }
+    if (tune[i]) { g.fillStyle = col('--accent'); g.globalAlpha = 0.9; g.fillRect(i, h - 14 - barH(tune[i]), 1, barH(tune[i])); }
+  }
+  g.globalAlpha = 1;
+  // time marks along the bottom
+  const every = [5, 10, 15, 30, 60, 120].find(x => (x / dur) * w >= 46) || 300;
+  g.fillStyle = col('--muted'); g.font = '10px sans-serif'; g.textBaseline = 'bottom';
+  for (let t = 0; t <= dur; t += every) { const x = (t / dur) * w; g.fillRect(x, h - 13, 1, 3); g.fillText(fmtTime(t), x + 2, h); }
+  // chosen part: everything outside it is dimmed
+  const [s, e] = snipRange(), x0 = (s / dur) * w, x1 = Math.min(w, (e / dur) * w);
+  g.fillStyle = col('--bg'); g.globalAlpha = 0.65;
+  g.fillRect(0, 0, x0, h - 14); g.fillRect(x1, 0, w - x1, h - 14);
+  g.globalAlpha = 1; g.fillStyle = col('--accent');
+  g.fillRect(x0 - 1, 0, 3, h - 14); g.fillRect(x1 - 2, 0, 3, h - 14);
+  g.fillRect(x0 - 4, 0, 9, 6); g.fillRect(x1 - 5, 0, 9, 6);
+  if (player.pos !== null) { g.fillStyle = col('--text'); g.fillRect(((s + player.pos) / dur) * w, 0, 2, h - 14); }
+  $('#snipInfo').textContent = `${fmtTime(s)}.${Math.round((s % 1) * 10)} → ${fmtTime(e)}.${Math.round((e % 1) * 10)} · ${(e - s).toFixed(1)} s`;
+}
+/** Writes start/length into the inputs (snapped, kept inside the song and 1..MAX_SECONDS long). */
+function setSnip(s, e) {
+  const dur = state.midi.midi.duration, snap = v => Math.round(v / SNAP) * SNAP;
+  s = Math.max(0, Math.min(snap(s), dur - 1)); e = Math.min(dur, Math.max(snap(e), s + 1));
+  if (e - s > MAX_SECONDS) e = s + MAX_SECONDS;
+  $('#start').value = +s.toFixed(1); $('#length').value = +(e - s).toFixed(1);
+  drawSnip();
+}
+function initSnip() {
+  const cv = $('#snip');
+  const timeAt = ev => { const r = cv.getBoundingClientRect(); return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * state.midi.midi.duration; };
+  cv.addEventListener('pointerdown', ev => {
+    if (!state.midi) return;
+    const r = cv.getBoundingClientRect(), dur = state.midi.midi.duration, [s, e] = snipRange();
+    const px = t => (t / dur) * r.width, x = ev.clientX - r.left, t = timeAt(ev);
+    if (Math.abs(x - px(s)) <= 8) snip.drag = { kind: 'start' };
+    else if (Math.abs(x - px(e)) <= 8) snip.drag = { kind: 'end' };
+    else if (t > s && t < e && e - s < dur - SNAP) snip.drag = { kind: 'move', off: t - s, len: e - s };   // whole song chosen: drag picks a new part
+    else snip.drag = { kind: 'new', anchor: t };
+    cv.setPointerCapture(ev.pointerId);
+  });
+  cv.addEventListener('pointermove', ev => {
+    if (!snip.drag) return;
+    const t = timeAt(ev), [s, e] = snipRange(), d = snip.drag;
+    if (d.kind === 'start') setSnip(Math.min(t, e - 1), e);
+    else if (d.kind === 'end') setSnip(s, t);
+    else if (d.kind === 'move') { const ns = Math.max(0, Math.min(t - d.off, state.midi.midi.duration - d.len)); setSnip(ns, ns + d.len); }
+    else setSnip(Math.min(d.anchor, t), Math.max(d.anchor, t));
+  });
+  const done = () => {
+    if (!snip.drag) return;
+    snip.drag = null;
+    $('#start').dispatchEvent(new Event('change', { bubbles: true }));   // update the result once, on release
+  };
+  cv.addEventListener('pointerup', done);
+  cv.addEventListener('pointercancel', done);
+  $('#snipPlay').onclick = () => play('original');
+  $('#snipStop').onclick = stopAll;
+  // position slider: dragging it rewinds or skips; if something was playing it goes on from there on release
+  const seek = $('#seek');
+  seek.addEventListener('input', () => {
+    if (player.kind && !player.seeking) { player.seeking = player.kind; stopSound(); cancelAnimationFrame(player.raf); player.kind = null; }
+    player.pos = +seek.value; showPos();
+  });
+  seek.addEventListener('change', () => {
+    const resume = player.seeking; player.seeking = null;
+    if (resume) play(resume, +seek.value);
+  });
+  $('#start').addEventListener('input', () => drawSnip());
+  $('#length').addEventListener('input', () => drawSnip());
+}
+
 // ---------- preview synth ----------
 let actx = null, playing = [];
 function ctx() { return (actx ||= new (window.AudioContext || window.webkitAudioContext)()); }
-function stopAll() { playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = []; }
+function stopSound() { playing.forEach(n => { try { n.stop(); } catch { /* already stopped */ } }); playing = []; }
+/** Stop: the position stays where it is, so Play goes on from there (drag the slider back to rewind). */
+function stopAll() {
+  stopSound();
+  cancelAnimationFrame(player.raf); player.kind = null;
+  showPos();
+}
+
+// ---------- player: what's playing, how far along it is, and seeking ----------
+// pos = seconds into the chosen part (null = at the start, nothing played yet)
+const player = { kind: null, from: 0, t0: 0, raf: 0, pos: null, seeking: null };
+const fmtPos = t => `${fmtTime(t)}.${Math.floor((t % 1) * 10)}`;
+function showPos() {
+  const len = state.settings ? state.settings.length : 0, seek = $('#seek');
+  if (!seek) return;
+  seek.max = Math.max(0.1, len);
+  if (!player.seeking) seek.value = player.pos ?? 0;
+  $('#seekTime').textContent = `${fmtPos(player.pos ?? 0)} / ${fmtPos(len)}`;
+  drawSnip();
+}
+/** Plays the chosen part from `from` seconds in: 'original' = every MIDI track, 'preview' = the Minecraft notes. */
+function play(kind, from = player.pos ?? 0) {
+  if (!state.settings || (kind === 'preview' && !state.song)) return;
+  const len = state.settings.length;
+  if (from >= len - 0.05) from = 0;   // at the end: start again
+  stopSound(); cancelAnimationFrame(player.raf);
+  const ac = ctx(); ac.resume();
+  const master = ac.createGain(); master.connect(ac.destination);
+  const t0 = ac.currentTime + 0.1;
+  if (kind === 'original') {
+    master.gain.value = 0.5;
+    const s = state.settings;
+    for (const t of state.midi.tracks) for (const n of t.notes) {
+      const at = n.time - s.start;
+      if (at < from || at >= len) continue;
+      const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.4 };
+      synthNote(ac, master, e, t0 + at - from);
+    }
+  } else {
+    master.gain.value = 0.8;
+    for (const r of state.song.rows) if (r.time >= from) for (const e of r.events) synthNote(ac, master, e, t0 + r.time - from);
+  }
+  Object.assign(player, { kind, from, t0, pos: from });
+  const tick = () => {
+    const p = player.from + Math.max(0, ctx().currentTime - player.t0);
+    if (p >= len) { player.kind = null; player.pos = null; showPos(); return; }   // finished: back to the start
+    player.pos = p; showPos();
+    player.raf = requestAnimationFrame(tick);
+  };
+  player.raf = requestAnimationFrame(tick);
+}
 function noiseBuffer(ac) {
   if (noiseBuffer.b) return noiseBuffer.b;
   const b = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
@@ -237,27 +444,6 @@ function synthNote(ac, out, e, t) {
   g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0005, t + len);
   node.connect(g); o.start(t); o.stop(t + len + 0.05); playing.push(o);
 }
-function playPreview() {
-  if (!state.song) return;
-  stopAll();
-  const ac = ctx(); ac.resume();
-  const master = ac.createGain(); master.gain.value = 0.8; master.connect(ac.destination);
-  const t0 = ac.currentTime + 0.1;
-  for (const r of state.song.rows) for (const e of r.events) synthNote(ac, master, e, t0 + r.time);
-}
-/** Plays every track of the chosen part (what the MIDI really sounds like, roughly). */
-function playOriginal() {
-  if (!state.midi || !state.settings) return;
-  stopAll();
-  const ac = ctx(); ac.resume();
-  const master = ac.createGain(); master.gain.value = 0.5; master.connect(ac.destination);
-  const t0 = ac.currentTime + 0.1, s = state.settings;
-  for (const t of state.midi.tracks) for (const n of t.notes) {
-    if (n.time < s.start || n.time >= s.start + s.length) continue;
-    const e = t.drums ? { drum: gmDrum(n.midi), vol: 0.6 } : { sound: 'note.harp', midi: n.midi, vol: 0.4 };
-    synthNote(ac, master, e, t0 + n.time - s.start);
-  }
-}
 
 // ---------- UI ----------
 const state = { midi: null, fileName: '', song: null, steps: [], pos: 0, settings: null, version: 0 };
@@ -276,6 +462,8 @@ function readSettings() {
     transpose: Math.max(-12, Math.min(12, Math.round(+$('#transpose').value || 0))),
     target: $('#target').value,
     build: segValue('build'),
+    detail: segValue('detail'),
+    hold: $('#hold').checked,
     slab: {
       x: Math.round(+$('#slabX').value || 0), y: Math.round(+$('#slabY').value || 0), z: Math.round(+$('#slabZ').value || 0),
       w: Math.max(1, Math.min(64, Math.round(+$('#slabW').value || 16))), d: Math.max(1, Math.min(64, Math.round(+$('#slabD').value || 16))),
@@ -294,6 +482,7 @@ function fillInstruments() {
 /** Grey out what a switched-off layer doesn't use, and show ON/OFF in words. */
 function syncLayers() {
   document.body.classList.toggle('slab-mode', segValue('build') === 'slab');
+  document.body.classList.toggle('full-mode', segValue('detail') === 'full');
   const on2 = $('#on2').checked, on3 = $('#on3').checked, m3 = $('#mode3').value;
   $$('#layer2 select').forEach(e => (e.disabled = !on2));
   $('#mode3').disabled = !on3;
@@ -363,7 +552,9 @@ function loadMidi(data, name) {
   $('#start').value = Math.floor(lead.first);
   $('#length').value = Math.min(20, Math.max(1, Math.ceil(midi.duration - Math.floor(lead.first))));
   $('#status').textContent = '';
+  $('#snipBox').classList.remove('hidden');
   convert();
+  drawSnip();
 }
 
 function renderSources() {
@@ -411,7 +602,8 @@ function midiTracks(s) {
     .sort((a, b) => a.t - b.t || ['kick', 'snare', 'hat'].indexOf(a.kind) - ['kick', 'snare', 'hat'].indexOf(b.kind));
   // auto layer 3: harmony only where the drums are resting
   const harm = s.mode3 === 'auto' ? harmony.filter(n => !drumTracks.some(t => playsAt(t, n.t + s.start))) : harmony;
-  return { mel, bass, harmony: harm, drums };
+  const all = m.tonal.flatMap(notesOf).sort((a, b) => a.t - b.t || b.midi - a.midi);
+  return { mel, bass, harmony: harm, drums, all };
 }
 
 async function loadFile(file) {
@@ -438,13 +630,19 @@ function convert() {
   state.steps = buildSteps(state.song);
   state.pos = 0;
   state.version++;
+  // a different part: the position goes back to its start
+  const part = `${s.start}:${s.length}`;
+  if (part !== player.part) { player.part = part; if (player.kind) stopAll(); player.pos = null; }
+  showPos();
   $('#status').textContent = `Updated (${state.steps.length} command blocks).`;
+  $('#detailInfo').textContent = `${s.detail === 'full' ? 'Every note at its exact pitch' : 'Simple: tune, bass line and drums'}: ${state.steps.length} blocks for this part, about ${fmtDuration(state.steps.length * 15)} to auto-build.`;
   renderResult();
 }
 
 /** Plain-words reasons for an empty layer. */
 function layerWarnings(s) {
   const m = state.midi, warn = [], end = s.start + s.length;
+  if (s.detail === 'full') return state.song.rows.length ? [] : [`No notes in ${s.start}–${end.toFixed(1)} s.`];
   const count = (l, f = () => true) => state.song.rows.filter(r => r.events.some(e => e.layer === l && f(e))).length;
   const range = `${s.start}–${end.toFixed(1)} s`;
   const why = idx => {
@@ -474,7 +672,13 @@ function renderResult() {
     return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([i]) => state.midi.tracks.find(t => t.idx === +i)?.name).join(', ');
   };
   const drumsN = n(2, e => e.drum), harmN = n(2, e => !e.drum);
-  const layers = [
+  const evs = l => song.rows.reduce((a, r) => a + r.events.filter(e => e.layer === l).length, 0);
+  const soundsOf = l => [...new Set(song.rows.flatMap(r => r.events.filter(e => e.layer === l).map(e => INSTRUMENTS[e.sound]?.label)))].filter(Boolean).join(', ');
+  const layers = s.detail === 'full' ? [
+    `Every note, F#3 and up · ${evs(0)} notes (${soundsOf(0)})`,
+    evs(1) ? `Low notes · ${evs(1)} (${soundsOf(1)})` : null,
+    evs(2) ? `Drums · ${evs(2)} hits` : null,
+  ] : [
     `Melody: ${INSTRUMENTS[s.inst1].label} · ${n(0)} notes${used('mel') ? ` from ${used('mel')}` : ''}`,
     s.mode2 === 'bass' ? `Bass: ${INSTRUMENTS[s.inst2].label} · ${n(1)} notes${used('bass') ? ` from ${used('bass')}` : ''}` : null,
     s.mode3 === 'off' ? null : [
@@ -501,7 +705,7 @@ function renderResult() {
       <canvas class="roll" id="roll"></canvas>
       <div class="legend-row">${layers.map((l, i) => l ? `<span><i class="swatch" style="background:${LAYER_COLORS[i]}"></i>${esc(l)}</span>` : '').join('')}</div>
       ${warnings.map(w => `<p class="warnline">&#9888; ${esc(w)}</p>`).join('')}
-      ${slab ? `<p class="hint">Auto-build time: about ${fmtDuration(blocks * 3)} (roughly 3 s per block; longer on a laggy Realm). You can stop and resume any time.</p>`
+      ${slab ? `<p class="hint">Auto-build time: about ${fmtDuration(blocks * 15)} (roughly 15 s per block; longer on a laggy Realm). You can stop and resume any time.</p>`
         : blocks > 1500 ? `<p class="hint" style="color:var(--warn)">&#9888; That's a lot of blocks. Try a shorter part or the 2-tick grid.</p>` : ''}
     </div>
 
@@ -530,7 +734,7 @@ function renderResult() {
       <div class="row"><h2 style="margin:0">All commands</h2><span class="spacer"></span>
         <button class="small" id="dlTxt">Download as .txt</button></div>
       <div class="table-wrap" style="margin-top:10px"><table class="steps-table"><thead><tr><th>#</th><th>Time</th><th>Wait</th><th>Command block(s)</th></tr></thead>
-      <tbody>${song.rows.map((r, i) => `<tr data-row="${i}"><td>${i + 1}</td><td>${r.time.toFixed(1)}s</td>
+      <tbody>${song.rows.map((r, i) => `<tr data-row="${i}"><td>${i + 1}</td><td>${fmtStepTime(r.time, s)}s</td>
         <td class="wait">${waitText(r.waitTicks, chain, i, s.build)}</td>
         <td>${r.events.map((e, ei) => {
           const st = stepAt[`${i}:${ei}`];
@@ -539,8 +743,8 @@ function renderResult() {
         }).join('')}</td></tr>`).join('')}
       </tbody></table></div>
     </div>`;
-  $('#pOrig').onclick = playOriginal;
-  $('#pPrev').onclick = playPreview;
+  $('#pOrig').onclick = () => play('original');
+  $('#pPrev').onclick = () => play('preview');
   $('#pStop').onclick = stopAll;
   $('#dlTxt').onclick = downloadTxt;
   if ($('#dlPlan')) $('#dlPlan').onclick = downloadPlan;
@@ -613,7 +817,7 @@ function renderQuick() {
       `First place repeater${repeaters(it.wait).length > 1 ? 's' : ''}: <b>${repeaters(it.wait).join(' + ')}</b> tick${it.wait > 1 ? 's' : ''}, then dust`;
   }
   q.innerHTML = `
-    <div class="now">Block <b>${p + 1}</b> of ${st.length} · step ${it.row + 1} · ${row.time.toFixed(1)} s
+    <div class="now">Block <b>${p + 1}</b> of ${st.length} · step ${it.row + 1} · ${fmtStepTime(row.time, state.song.settings)} s
       ${row.events.length > 1 ? `· block ${it.ei + 1} of ${row.events.length} in this column` : ''}</div>
     ${before ? `<div class="wait">${before}</div>` : ''}
     <div>${esc(it.how)}</div>
@@ -720,9 +924,10 @@ function init() {
     if (e.code === 'Space') { e.preventDefault(); quickCopy(); }
     if (e.code === 'Backspace') { e.preventDefault(); state.pos = Math.max(0, state.pos - 1); renderQuick(); }
   });
-  window.addEventListener('resize', () => state.song && drawRoll());
+  window.addEventListener('resize', () => { if (state.song) drawRoll(); drawSnip(); });
+  initSnip();
 }
 
 // exposed for automated tests
-window.MM = { state, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
+window.MM = { state, player, setSnip, buildSong, buildSteps, slabLayout, repeaters, fitToInstrument, midiTracks, convert, INSTRUMENTS };
 init();

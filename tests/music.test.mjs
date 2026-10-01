@@ -158,6 +158,31 @@ check(r.rows.flatMap(x => x.events).every(e => / @p ~ ~ ~ [\d.]+ [\d.]+$/.test(e
 r = await setNum('#transpose', 2);
 check(r.rows.length > 0, 'transpose updates live');
 
+// ---- 6b. detail: every note at its exact pitch ----
+r = await change(() => page.click('#detail [data-v=full]'));
+const full = await page.evaluate(() => {
+  const s = MM.state.settings, m = MM.state.midi;
+  const ev = MM.state.song.rows.flatMap(x => x.events).filter(e => !e.drum);
+  const src = new Set(m.tonal.flatMap(t => t.notes.filter(n => n.time >= s.start && n.time < s.start + s.length))
+    .filter(n => n.midi + s.transpose >= 54 || s.mode2 === 'bass').map(n => `${Math.round((n.time - s.start) / MM.state.song.stepSec)}:${n.midi}`));
+  return { placed: ev.length, unique: src.size, wrong: ev.filter(e => e.midi !== e.orig + s.transpose).length,
+    inRange: ev.every(e => Math.abs(e.midi - MM.INSTRUMENTS[e.sound].center) <= 12), info: document.querySelector('#detailInfo').textContent };
+});
+check(full.placed === full.unique && full.wrong === 0 && full.inRange, `every note: all ${full.unique} chord and melody notes placed, each at its exact pitch (${full.wrong} moved)`);
+check(/\d+ blocks for this part, about .+ to auto-build/.test(full.info) && !(await page.locator('#src1').isVisible()), 'every note: shows blocks and build time, hides the per-layer track pickers');
+check(!(await page.locator('#hold').isChecked()) && !(await page.evaluate(() => MM.state.song.rows.some(x => x.events.some(e => e.hold)))), 'hold long notes is off by default: one pluck per note');
+const before = await page.evaluate(() => MM.state.steps.length);
+r = await change(() => page.check('#hold'));
+const held = await page.evaluate(() => {
+  const s = MM.state.settings, rows = MM.state.song.rows;
+  const src = MM.state.midi.tonal.flatMap(t => t.notes).map(n => ({ a: n.time - s.start, b: n.time - s.start + n.duration, m: n.midi + s.transpose }));
+  const reps = rows.flatMap(x => x.events.filter(e => e.hold).map(e => ({ t: x.time, m: e.midi, vol: e.vol })));
+  return { n: reps.length, blocks: MM.state.steps.length, inside: reps.every(r => src.some(n => n.m === r.m && r.t > n.a && r.t < n.b + 0.05)), drums: rows.some(x => x.events.some(e => e.hold && e.drum)) };
+});
+check(held.n > 0 && held.blocks === before + held.n && held.inside && !held.drums, `hold on: ${held.n} replays, each inside a long note of the same pitch, no drums replayed`);
+r = await change(() => page.uncheck('#hold'));
+r = await change(() => page.click('#detail [data-v=simple]'));
+
 // ---- 7. slab (auto-builder) mode ----
 r = await change(() => page.click('#ticks [data-v="1"]'));
 r = await change(() => page.click('#build [data-v=slab]'));
@@ -174,6 +199,14 @@ check(slab.blocks.every(b => b.x >= 100 && b.x <= 103 && b.z >= -20 && b.z <= -1
 const firstStep = r.rows[0].step;
 check(slab.blocks.every((b, i) => b.delay === Math.round((b.time - r.rows[0].time) * 20)), 'Delay in Ticks = time since the first note × 20');
 check(slab.blocks.every((b, i, a) => i === 0 || b.delay >= a[i - 1].delay), 'blocks are placed in time order');
+// slab timing uses single game ticks (0.05 s), not the 0.1 s repeater grid: odd ticks and triplets survive
+const tickCheck = await page.evaluate(() => {
+  const s = { ...MM.state.settings, build: 'slab', mode2: 'off', mode3: 'off', transpose: 0 };
+  const mel = [0, 0.05, 0.15, 1 / 3, 2 / 3, 1].map((t, i) => ({ t, midi: 72 + i, dur: 0.05 }));
+  return MM.slabLayout(MM.buildSong({ mel, bass: [], harmony: [], drums: [] }, s)).blocks.map(b => b.delay).join();
+});
+check(tickCheck === '0,1,3,7,13,20', 'slab: every note on its nearest game tick, triplets included (' + tickCheck + ')');
+check(!(await page.locator('#ticks').isVisible()) && (await page.locator('text=nearest game tick').isVisible()), 'slab mode hides the repeater grid and says it uses game ticks');
 const kinds = slab.levels.map(l => l.kind[0]).join('');
 check(/^(cgc)*(cg)?$/.test(kinds.replace(/cgc/g, 'cgc')) && kinds.startsWith('cg'), `levels go command, glass, command, command, glass… (${kinds})`);
 const cmdYs = new Set(slab.levels.filter(l => l.kind === 'command').map(l => l.y)), glassYs = slab.levels.filter(l => l.kind === 'glass').map(l => l.y);
@@ -186,6 +219,47 @@ const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
 check(plan.format === 'bedrock-music-maker/slab-plan' && plan.blocks.length === nBlocks && plan.blocks[0].command.startsWith('/playsound') && plan.levels.length === slab.levels.length, `build plan download (${path.basename(planPath)})`);
 await page.click('#qCopy');
 check((await page.locator('#quick').textContent()).includes('Delay in Ticks'), 'Copy next shows position and Delay in Ticks for hand building');
+
+// ---- 7b. snip editor: drag across the timeline to choose the part ----
+check(await page.locator('#snip').isVisible(), 'snip timeline shows once a song is loaded');
+const dur = await page.evaluate(() => MM.state.midi.midi.duration);
+await page.locator('#snip').scrollIntoViewIfNeeded();
+const box = await page.locator('#snip').boundingBox();
+const vSnip = await version();
+await page.mouse.move(box.x + box.width * 0.25, box.y + box.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2, { steps: 5 });
+await page.mouse.up();
+await page.waitForFunction(x => MM.state.version > x, vSnip, { timeout: 5000 });
+const snipped = await page.evaluate(() => [+document.querySelector('#start').value, +document.querySelector('#length').value, MM.state.settings.start, MM.state.settings.length]);
+check(Math.abs(snipped[0] - dur * 0.25) < 0.3 && Math.abs(snipped[1] - dur * 0.35) < 0.3 && snipped[2] === snipped[0] && Math.abs(snipped[3] - snipped[1]) < 1e-6,
+  `dragging across the timeline sets start and length, and the result updates (${snipped[0]} s + ${snipped[1]} s)`);
+// drag the end edge in
+const endX = box.x + box.width * 0.6;
+const v2 = await version();
+await page.mouse.move(endX, box.y + 10); await page.mouse.down();
+await page.mouse.move(box.x + box.width * 0.45, box.y + 10, { steps: 5 }); await page.mouse.up();
+await page.waitForFunction(x => MM.state.version > x, v2, { timeout: 5000 });
+const afterEnd = await page.evaluate(() => [+document.querySelector('#start').value, +document.querySelector('#length').value]);
+check(afterEnd[0] === snipped[0] && Math.abs(afterEnd[1] - dur * 0.2) < 0.3, `dragging the end edge only changes the end (${afterEnd[1]} s)`);
+check((await page.locator('#snipInfo').textContent()).includes(afterEnd[1].toFixed(1) + ' s'), 'shows start, end and length under the timeline');
+
+// ---- 7c. position slider: shows how far along it is, drag to rewind ----
+check(await page.locator('#seek').isVisible() && /^0:00\.0 \/ 0:0\d\.\d$/.test(await page.locator('#seekTime').textContent()), 'position slider shows 0:00.0 / part length');
+await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = 1; s.dispatchEvent(new Event('input')); s.dispatchEvent(new Event('change')); });
+check((await page.locator('#seekTime').textContent()).startsWith('0:01.0'), 'dragging the slider moves the position (0:01.0)');
+await page.click('#snipPlay'); await page.waitForTimeout(700);
+const playing = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(playing[1] === 'original' && playing[0] > 1.2 && playing[0] < 2.5, `Play part starts from the slider and the slider moves along (${playing[0].toFixed(2)} s)`);
+await page.evaluate(() => { const s = document.querySelector('#seek'); s.value = 0.2; s.dispatchEvent(new Event('input')); });
+const midDrag = await page.evaluate(() => MM.player.kind);
+await page.evaluate(() => document.querySelector('#seek').dispatchEvent(new Event('change')));
+await page.waitForTimeout(300);
+const rewound = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(midDrag === null && rewound[1] === 'original' && rewound[0] < 0.9, `rewinding while playing: pauses while dragging, plays on from there (${rewound[0].toFixed(2)} s)`);
+await page.click('#snipStop');
+const stopped = await page.evaluate(() => [+document.querySelector('#seek').value, MM.player.kind]);
+check(stopped[1] === null && stopped[0] > 0, 'Stop keeps the position, so Play goes on from there');
 
 // ---- 8. not a MIDI file ----
 const bogus = path.join(out, 'not-midi.mid'); fs.writeFileSync(bogus, 'hello');

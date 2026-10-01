@@ -56,6 +56,17 @@ label.switch input { width: 18px; height: 18px; accent-color: var(--accent); }
 .live-note { margin-top: 14px; color: var(--accent); }
 .xyz { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 body:not(.slab-mode) .slab-only { display: none !important; }
+#snip { display: block; width: 100%; height: 64px; border: 1px solid var(--line); border-radius: var(--radius); cursor: ew-resize; touch-action: none; }
+.snip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.snip-row button { white-space: nowrap; }
+.snip-row .spacer { flex: 1; }
+#snipInfo { white-space: nowrap; }
+.hold-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.seek-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+#seek { flex: 1; accent-color: var(--accent); }
+#seekTime { font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--muted); font-size: 12px; }
+body.slab-mode .not-slab { display: none !important; }
+body.full-mode .not-full { display: none !important; }
 #slabSettings { margin-top: 8px; }
 .pos { font-family: Consolas, monospace; color: var(--blue); white-space: nowrap; }
 .dly { font-family: Consolas, monospace; color: var(--warn); white-space: nowrap; }

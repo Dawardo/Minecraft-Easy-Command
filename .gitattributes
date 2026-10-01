@@ -1,2 +1,5 @@
 *.bat text eol=crlf
 *.ps1 text eol=crlf
+# not needed in the download zip
+tests/ export-ignore
+.github/ export-ignore
