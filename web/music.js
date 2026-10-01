@@ -558,7 +558,7 @@ function slabHowTo(slab, s) {
     <ol class="steps">
       <li>Download the build plan: <button class="primary small" id="dlPlan">&#11015; Download build plan</button></li>
       <li>Double-click <b>Start-Auto-Builder.bat</b> (next to Start-Music-Maker.bat). It finds the newest plan in your Downloads folder.</li>
-      <li>In Minecraft: Creative, flying, cheats on, near <span class="pos">${s.slab.x} ${s.slab.y} ${s.slab.z}</span>, with nothing in the way. Then follow the builder window.</li>
+      <li>In Minecraft: Creative, flying, cheats on, with nothing in the way. The builder asks where to build: keep <span class="pos">${s.slab.x} ${s.slab.y} ${s.slab.z}</span> or type the corner where you're standing. The first time, it does a quick typing test and calibration with you (F8 / F9).</li>
     </ol>
     <h3>Once it's built</h3>
     ${list([slab.gamerule, slab.tickingArea])}

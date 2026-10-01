@@ -43,21 +43,22 @@ Bedrock syntax: `/playsound <sound> [player] [x y z] [volume] [pitch] [minimumVo
 Realms can't load your own files, so the builder fills every command block **through the normal command block screen, like a player would**:
 
 1. In the page pick **Slab (auto-builder)**, set the corner block and footprint, and click **Download build plan**.
-2. Double-click **`Start-Auto-Builder.bat`**. It finds the newest `*.slabplan.json` in Downloads, or you can drag one onto the `.bat`. Pick a speed (use *slow* on a laggy Realm), and do a short **test run** (e.g. 10 blocks) first.
+2. Double-click **`Start-Auto-Builder.bat`**. It finds the newest `*.slabplan.json` in Downloads (or drag one onto the `.bat`). It then asks:
+   - **speed**: use *slow* on a laggy Realm
+   - **where to build**: Enter keeps the plan's corner, or type a new one like `120 64 -35`. Turn on coordinates with `/gamerule showcoordinates true` and use the Position shown where you stand.
+   - **which block to start from**: if earlier ones are already built
+   - **a test run** (e.g. 10 blocks), with an optional **step-by-step** mode (F8 before every action)
 3. In Minecraft: Creative, flying, operator, near the corner, with the area empty. Click into Minecraft and press **F8**.
-4. **One-time calibration:** the builder opens the first command block. Then:
-   - hover the **Command Input** box and press **F8**
-   - hover the **left panel** and press **F8**
-   - after it scrolls, hover the **right end of Delay in Ticks** and press **F8**
-
-   It saves this; recalibrate (`-Recalibrate`) if you change the window size or GUI scale. Running Minecraft in a window next to the builder window makes the prompts easy to read.
+4. **First time only:**
+   - **Typing test:** the builder opens chat and sends you a private `/tell` message using a few different methods. Answer **F8** when you see it in chat and **F9** when you don't. It remembers the method that works (`-Retest` to redo it).
+   - **Calibration:** the builder opens the first command block. Hover over **Command Input** and press **F8**, then the **left panel** and **F8**. After it scrolls, hover over the **right end of Delay in Ticks** and press **F8**. Redo it with `-Recalibrate` if you change the window size or GUI scale.
 5. Hands off. For every block it:
    - types `/fill` for each new layer and `/tp @s x y+2 z 0 90` into chat, so it's straight above the block looking down
    - right-clicks, and **checks pixels that the screen really opened** (it retries, and re-teleports if not)
-   - pastes the command, scrolls down, pastes Delay in Ticks
+   - types the command, scrolls down, types Delay in Ticks
    - presses Esc and checks the screen closed
 
-   **F9** pauses/resumes and **F12** stops. It also pauses by itself whenever Minecraft isn't the active window. Progress is saved after every block: run it again to **resume**, and the half-done block is re-placed fresh.
+   **F9** pauses/resumes and **F12** stops. It also pauses by itself whenever Minecraft isn't the active window. Progress, including the corner you chose, is saved after every block: run it again to **resume**, and the half-done block is re-placed fresh.
 6. When it's done it shows the Start/Stop commands, plus `/gamerule commandblockoutput false` and a `/tickingarea` so the song plays even when nobody is next to it.
 
 It uses only what ships with Windows (PowerShell 5.1+). It's about 3 seconds per block at normal speed.
@@ -73,7 +74,11 @@ It uses only what ships with Windows (PowerShell 5.1+). It's about 3 seconds per
 - **Output:** command format and pitch range, repeater ticks, chain delays, Copy next and the .txt export.
 - **Slab layout:** a unique position per note, delays equal to time × 20, the correct level pattern, one Start/Stop command, and the build plan download.
 
-`node tests/auto-builder.test.mjs` (needs PowerShell; set `PWSH` to its path) dry-runs the auto-builder on that plan, printing every key and click instead of sending them. It checks the clear, layer and teleport commands, the pasted commands and delays, the per-block sequence, test-run limits, resume, and the finish.
+`node tests/auto-builder.test.mjs` (needs PowerShell; set `PWSH` to its path) dry-runs the auto-builder on that plan, printing every key and click instead of sending them. It checks:
+- the clear, layer and teleport commands, the typed commands and delays, and the per-block sequence
+- test-run limits, resume and the finish
+- building at a different corner
+- starting part-way through
 
 MIDI parsing uses [@tonejs/midi](https://github.com/Tonejs/Midi) (MIT, bundled in `web/vendor/midi.js`).
 

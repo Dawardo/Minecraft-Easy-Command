@@ -11,6 +11,7 @@
     5. presses Esc and checks the screen closed
 
   Keys while it runs:  F9 = pause / resume    F12 = stop (progress is saved, run again to resume)
+  First run: a short typing test finds a way of typing that your Minecraft accepts (you answer with F8 / F9).
   Uses only what ships with Windows (PowerShell 5.1+). -DryRun prints every action instead of doing it.
 #>
 param(
@@ -19,8 +20,11 @@ param(
   [string]$ChatKey = 'T',
   [int]$Limit = -1,
   [switch]$Recalibrate,
+  [switch]$Retest,                 # redo the typing test
+  [switch]$Step,                   # step-by-step: press F8 before every action (for finding problems)
   [switch]$DryRun,
-  [switch]$Yes                     # answer "yes" to every question (used by the dry-run test)
+  [switch]$Yes,                    # answer "yes" to every question (used by the dry-run test)
+  [string]$Answers                 # answers to the questions in order, separated by | (used by the dry-run test)
 )
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -58,12 +62,33 @@ namespace Bdm {
 
     static void Send(INPUT i) { SendInput(1, new INPUT[] { i }, Marshal.SizeOf(typeof(INPUT))); }
 
-    // Games read scan codes, not virtual keys, so send the scan code.
-    public static void Key(int vk, bool up) {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern short VkKeyScanW(char c);
+    const uint UNICODE = 0x0004;
+
+    // useScan = scan code only (what games read for movement keys); otherwise virtual key + scan code (like a real keyboard driver)
+    public static void Key(int vk, bool up, bool useScan) {
       INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
       i.U.ki.wScan = (ushort)MapVirtualKey((uint)vk, 0);
-      i.U.ki.dwFlags = SCANCODE | (up ? KEYUP : 0);
+      if (useScan) { i.U.ki.dwFlags = SCANCODE | (up ? KEYUP : 0); }
+      else { i.U.ki.wVk = (ushort)vk; i.U.ki.dwFlags = (up ? KEYUP : 0); }
       Send(i);
+    }
+    public static void Unicode(char c, bool up) {
+      INPUT i = new INPUT(); i.type = INPUT_KEYBOARD;
+      i.U.ki.wScan = c; i.U.ki.dwFlags = UNICODE | (up ? KEYUP : 0);
+      Send(i);
+    }
+    // Types one character the way a keyboard would (with Shift when needed). Returns false if the layout can't type it.
+    public static bool TypeChar(char c, bool useScan, int gapMs) {
+      short r = VkKeyScanW(c);
+      if (r == -1) return false;
+      int vk = r & 0xFF, shift = (r >> 8) & 0xFF;
+      if ((shift & 6) != 0) return false; // needs Ctrl/Alt: not typable reliably
+      if ((shift & 1) != 0) { Key(0x10, false, useScan); System.Threading.Thread.Sleep(gapMs); }
+      Key(vk, false, useScan); System.Threading.Thread.Sleep(gapMs);
+      Key(vk, true, useScan); System.Threading.Thread.Sleep(gapMs);
+      if ((shift & 1) != 0) { Key(0x10, true, useScan); System.Threading.Thread.Sleep(gapMs); }
+      return true;
     }
     public static void Mouse(uint flags, int data) {
       INPUT i = new INPUT(); i.type = INPUT_MOUSE;
@@ -95,17 +120,37 @@ function Wait([int]$ms) { if (-not $DryRun) { Start-Sleep -Milliseconds ([int]($
 function Log([string]$msg, [string]$color = 'Gray') { Write-Host $msg -ForegroundColor $color }
 function Act([string]$msg) { if ($DryRun) { Write-Host "  [dry] $msg" -ForegroundColor DarkGray } }
 
-function Tap([int]$vk) { Act "key $vk"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true); Start-Sleep -Milliseconds 30 } }
+# How keys and text are sent. Chosen by the typing test and saved with the calibration.
+#   keys: 'vk' (virtual key + scan code) or 'scan' (scan code only)
+#   text: 'type' (press each key), 'unicode' (send characters), 'paste' (clipboard + Ctrl+V)
+$script:input = @{ keys = 'vk'; text = 'type' }
+function UseScan { return ($script:input.keys -eq 'scan') }
+function Tap([int]$vk) { Act "key $vk"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, (UseScan)); Start-Sleep -Milliseconds 30 } }
+function TapScan([int]$vk) { Act "key $vk (scan)"; if (-not $DryRun) { [Bdm.Win]::Key($vk, $false, $true); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, $true); Start-Sleep -Milliseconds 30 } }
 function Combo([int]$vk) {
   Act "ctrl+$vk"
   if (-not $DryRun) {
-    [Bdm.Win]::Key($VK.Ctrl, $false); Start-Sleep -Milliseconds 30
-    [Bdm.Win]::Key($vk, $false); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true); Start-Sleep -Milliseconds 30
-    [Bdm.Win]::Key($VK.Ctrl, $true); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($VK.Ctrl, $false, (UseScan)); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($vk, $false, (UseScan)); Start-Sleep -Milliseconds 30; [Bdm.Win]::Key($vk, $true, (UseScan)); Start-Sleep -Milliseconds 30
+    [Bdm.Win]::Key($VK.Ctrl, $true, (UseScan)); Start-Sleep -Milliseconds 30
   }
 }
-function Clip([string]$text) { Act "clipboard = $text"; if (-not $DryRun) { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 40 } }
-function Paste([string]$text) { Clip $text; Combo $VK.V }
+function Clip([string]$text) { Act "clipboard = $text"; if (-not $DryRun) { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 60 } }
+# Puts text into whatever text box has focus, using the chosen method.
+function TypeText([string]$text) {
+  Act "type ($($script:input.text)): $text"
+  if ($DryRun) { return }
+  switch ($script:input.text) {
+    'paste' { Set-Clipboard -Value $text; Start-Sleep -Milliseconds 60; Combo $VK.V }
+    'unicode' { foreach ($c in $text.ToCharArray()) { [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 8; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 8 } }
+    default {
+      foreach ($c in $text.ToCharArray()) {
+        if (-not [Bdm.Win]::TypeChar($c, (UseScan), 8)) { [Bdm.Win]::Unicode($c, $false); Start-Sleep -Milliseconds 8; [Bdm.Win]::Unicode($c, $true); Start-Sleep -Milliseconds 8 }
+      }
+    }
+  }
+}
+function Paste([string]$text) { TypeText $text }
 function MoveTo($p) { Act "move to $($p.x),$($p.y)"; if (-not $DryRun) { [void][Bdm.Win]::SetCursorPos($p.x, $p.y); Start-Sleep -Milliseconds 40 } }
 function LeftClick($p) { MoveTo $p; Act 'left click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.LeftDown, 0); Start-Sleep -Milliseconds 40; [Bdm.Win]::Mouse($M.LeftUp, 0) } }
 function RightClick { Act 'right click'; if (-not $DryRun) { [Bdm.Win]::Mouse($M.RightDown, 0); Start-Sleep -Milliseconds 50; [Bdm.Win]::Mouse($M.RightUp, 0) } }
@@ -114,16 +159,28 @@ function Pressed([int]$vk) { if ($DryRun) { return $false }; return ([Bdm.Win]::
 function Cursor { $p = New-Object Bdm.Win+POINT; [void][Bdm.Win]::GetCursorPos([ref]$p); return @{ x = $p.X; y = $p.Y } }
 function Beep([int]$f = 880) { if (-not $DryRun) { try { [Console]::Beep($f, 120) } catch {} } }
 
+function StepPause([string]$what) {
+  if (-not $Step -or $DryRun) { return }
+  Log "  NEXT: $what   (F8 = do it, F12 = stop)" 'Magenta'
+  while (-not (Pressed $VK.F8)) { if (Pressed $VK.F12) { throw 'STOP' }; Start-Sleep -Milliseconds 30 }
+  while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }
+}
 function WaitForKey([int]$vk) {
   if ($DryRun) { return }
   while (Pressed $vk) { Start-Sleep -Milliseconds 30 }          # let go first
   while (-not (Pressed $vk)) { Start-Sleep -Milliseconds 30 }
   while (Pressed $vk) { Start-Sleep -Milliseconds 30 }
 }
+$script:answerQueue = New-Object System.Collections.Queue
+if ($Answers) { foreach ($a in ($Answers -split '\|')) { $script:answerQueue.Enqueue($a) } }
+function Prompt([string]$question) {
+  if ($script:answerQueue.Count -gt 0) { $a = [string]$script:answerQueue.Dequeue(); Log "$question -> $a (given)"; return $a }
+  return (Read-Host $question)
+}
 function Ask([string]$question, [bool]$default = $true) {
   if ($Yes) { Log "$question -> yes (auto)"; return $true }
   $hint = '[y/n]'; if ($default) { $hint = '[Y/n]' } else { $hint = '[y/N]' }
-  $a = Read-Host "$question $hint"
+  $a = Prompt "$question $hint"
   if ([string]::IsNullOrWhiteSpace($a)) { return $default }
   return $a.Trim().ToLower().StartsWith('y')
 }
@@ -149,14 +206,52 @@ function WaitClosed([int]$timeoutMs) {
 }
 
 # ---------------------------------------------------------------- game actions
-$T = @{ chatOpen = 350; afterPaste = 150; afterEnter = 450; tp = 450; openTimeout = 4000; settle = 250; click = 150; scroll = 300; closeTimeout = 3000 }
+$T = @{ chatOpen = 700; afterPaste = 250; afterEnter = 600; tp = 500; openTimeout = 4000; settle = 300; click = 200; scroll = 350; closeTimeout = 3000 }
 
 function Chat([string]$command) {
   Log "    chat: $command" 'DarkCyan'
-  Clip $command
-  Tap ([int][char]$ChatKey.ToUpper()); Wait $T.chatOpen
-  Combo $VK.V; Wait $T.afterPaste
+  StepPause "open chat and type: $command"
+  TapScan ([int][char]$ChatKey.ToUpper()); Wait $T.chatOpen      # the chat key works as a scan code (confirmed)
+  TypeText $command; Wait $T.afterPaste
+  StepPause 'press Enter'
   Tap $VK.Enter; Wait $T.afterEnter
+}
+
+# ---------------------------------------------------------------- typing test
+# Tries each way of typing in chat; you say (F8 / F9) whether the message showed up.
+function TypingTest {
+  $methods = @(
+    @{ keys = 'vk'; text = 'type'; name = 'typing keys (normal)' },
+    @{ keys = 'vk'; text = 'unicode'; name = 'typing characters (unicode)' },
+    @{ keys = 'vk'; text = 'paste'; name = 'pasting (Ctrl+V)' },
+    @{ keys = 'scan'; text = 'type'; name = 'typing keys (scan codes)' },
+    @{ keys = 'scan'; text = 'paste'; name = 'pasting (scan-code Ctrl+V)' }
+  )
+  Log ''
+  Log '=== Typing test (one time) ===' 'Cyan'
+  Log 'The builder will open chat and send a private message to you. Watch the Minecraft chat.'
+  $n = 0
+  foreach ($m in $methods) {
+    $n++
+    $script:input = @{ keys = $m.keys; text = $m.text }
+    EnsureMinecraft
+    Log "Test $n of $($methods.Count): $($m.name)..." 'White'
+    TapScan ([int][char]$ChatKey.ToUpper()); Start-Sleep -Milliseconds 900
+    TypeText "/tell @s Music builder test $n"; Start-Sleep -Milliseconds 400
+    Tap $VK.Enter; Start-Sleep -Milliseconds 1200
+    Log "   Do you see 'Music builder test $n' in chat?  F8 = YES    F9 = NO" 'Yellow'
+    Beep
+    while ($true) {
+      if (Pressed $VK.F8) { while (Pressed $VK.F8) { Start-Sleep -Milliseconds 30 }; Log "   Using: $($m.name)" 'Green'; return $script:input }
+      if (Pressed $VK.F9) { while (Pressed $VK.F9) { Start-Sleep -Milliseconds 30 }; break }
+      if (Pressed $VK.F12) { throw 'STOP' }
+      Start-Sleep -Milliseconds 30
+    }
+    # close chat if it stayed open, clear what was typed
+    TapScan $VK.Esc; Start-Sleep -Milliseconds 300
+    if ([Bdm.Win]::ForegroundTitle() -notmatch 'Minecraft') { EnsureMinecraft }
+  }
+  throw 'None of the typing methods worked. Tell the developer what you saw in chat for each test.'
 }
 function Fmt([double]$v) { return $v.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
 function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (Fmt ($b.y + 2)), (Fmt ($b.z + 0.5))); Wait $T.tp }
@@ -164,6 +259,7 @@ function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (F
 function OpenBlock($b) {
   for ($try = 1; $try -le 3; $try++) {
     if ($DryRun) { $script:dryOpen = $true }
+    StepPause 'right-click the block below you'
     RightClick
     if (WaitOpen $T.openTimeout) { Wait $T.settle; return $true }
     Log "    the command block screen didn't open (try $try of 3)" 'Yellow'
@@ -174,15 +270,18 @@ function OpenBlock($b) {
 
 function FillBlock($b) {
   # Command Input (a fresh block is empty; Ctrl+A + Backspace makes sure)
+  StepPause 'click Command Input and type the command'
   LeftClick $cal.command; Wait $T.click
   Combo $VK.A; Tap $VK.Back
   Paste $b.command; Wait $T.afterPaste
   # Delay in Ticks: scroll the left panel to the bottom, then replace the value
+  StepPause 'scroll the left panel down and type Delay in Ticks'
   MoveTo $cal.panel; WheelDown 12; Wait $T.scroll
   LeftClick $cal.delay; Wait $T.click
   Combo $VK.A; for ($i = 0; $i -lt 7; $i++) { Tap $VK.Back }
   Paste ([string]$b.delay); Wait $T.afterPaste
   # close = save
+  StepPause 'press Esc to close (and save) the command block'
   if ($DryRun) { $script:dryOpen = $false }
   Tap $VK.Esc
   if (-not (WaitClosed $T.closeTimeout)) { Tap $VK.Esc; [void](WaitClosed $T.closeTimeout) }
@@ -219,7 +318,7 @@ function FindPlan {
   if ($f) {
     if (Ask "Use the newest plan: $($f.Name) ($($f.LastWriteTime))?") { return $f.FullName }
   }
-  $p = Read-Host 'Drag the .slabplan.json file into this window and press Enter'
+  $p = Prompt 'Drag the .slabplan.json file into this window and press Enter'
   return (Resolve-Path ($p.Trim('"', ' '))).Path
 }
 
@@ -258,6 +357,25 @@ function Calibrate($firstBlock) {
   return (Get-Content $calFile -Raw | ConvertFrom-Json)
 }
 
+# ---------------------------------------------------------------- moving the build to another corner
+function ShiftCoords([string]$cmd, [int]$dx, [int]$dy, [int]$dz) {
+  # shifts the first one or two "x y z" triples of /fill, /tickingarea add, /setblock
+  $m = [regex]::Match($cmd, '^(/fill|/tickingarea add|/setblock) (-?\d+) (-?\d+) (-?\d+)( (-?\d+) (-?\d+) (-?\d+))?(.*)$')
+  if (-not $m.Success) { return $cmd }
+  $out = '{0} {1} {2} {3}' -f $m.Groups[1].Value, ([int]$m.Groups[2].Value + $dx), ([int]$m.Groups[3].Value + $dy), ([int]$m.Groups[4].Value + $dz)
+  if ($m.Groups[5].Success) { $out += ' {0} {1} {2}' -f ([int]$m.Groups[6].Value + $dx), ([int]$m.Groups[7].Value + $dy), ([int]$m.Groups[8].Value + $dz) }
+  return $out + $m.Groups[9].Value
+}
+function ShiftPlan([int]$dx, [int]$dy, [int]$dz) {
+  if ($dx -eq 0 -and $dy -eq 0 -and $dz -eq 0) { return }
+  $script:blocks = @($script:blocks | ForEach-Object { [pscustomobject]@{ x = $_.x + $dx; y = $_.y + $dy; z = $_.z + $dz; delay = $_.delay; command = $_.command } })
+  $script:levels = @($script:levels | ForEach-Object { [pscustomobject]@{ y = $_.y + $dy; kind = $_.kind; fill = (ShiftCoords $_.fill $dx $dy $dz) } })
+  $p.clear = @(@($p.clear) | ForEach-Object { ShiftCoords $_ $dx $dy $dz })
+  $p.start = ShiftCoords $p.start $dx $dy $dz
+  $p.stop = ShiftCoords $p.stop $dx $dy $dz
+  $p.tickingArea = ShiftCoords $p.tickingArea $dx $dy $dz
+}
+
 # ================================================================ main
 Log '=== Bedrock Music Maker: Auto Builder ===' 'Cyan'
 Log 'F9 = pause / resume     F12 = stop (progress is saved)' 'Cyan'
@@ -274,7 +392,7 @@ $speedName = $Speed
 if (-not $speedName) {
   $speedName = 'normal'
   if (-not $Yes) {
-    $s = Read-Host 'Speed: 1 = fast, 2 = normal (default), 3 = slow (laggy Realm), 4 = very slow'
+    $s = Prompt 'Speed: 1 = fast, 2 = normal (default), 3 = slow (laggy Realm), 4 = very slow'
     $pick = @{ '1' = 'fast'; '3' = 'slow'; '4' = 'veryslow' }[$s.Trim()]
     if ($pick) { $speedName = $pick }
   }
@@ -285,18 +403,53 @@ Log "Speed: $speedName"
 # progress
 $progFile = "$planPath.progress.json"
 if ($DryRun) { $progFile = "$planPath.dryrun-progress.json" }
-$prog = @{ next = 0; levelsDone = @() }
+$prog = @{ next = 0; levelsDone = @(); offset = @(0, 0, 0) }
+$resuming = $false
 if (Test-Path $progFile) {
   $old = Get-Content $progFile -Raw | ConvertFrom-Json
   if ($old.next -gt 0 -or @($old.levelsDone).Count -gt 0) {
-    if (Ask "Resume where it stopped (block $($old.next + 1) of $($blocks.Count))?") { $prog = @{ next = [int]$old.next; levelsDone = @($old.levelsDone) } }
+    if (Ask "Resume where it stopped (block $($old.next + 1) of $($blocks.Count))?") {
+      $off = @(0, 0, 0); if ($old.offset) { $off = @($old.offset | ForEach-Object { [int]$_ }) }
+      $prog = @{ next = [int]$old.next; levelsDone = @($old.levelsDone | ForEach-Object { [int]$_ }); offset = $off }
+      $resuming = $true
+    }
   }
 }
 function SaveProgress { $prog | ConvertTo-Json | Set-Content -Path $progFile -Encoding UTF8 }
 
+if ($resuming) {
+  ShiftPlan $prog.offset[0] $prog.offset[1] $prog.offset[2]   # levelsDone are stored already shifted
+} elseif (-not $Yes) {
+  # where to build
+  Log ''
+  Log ("Where should the song go? The plan's corner is {0} {1} {2} (the first command block)." -f $p.corner.x, $p.corner.y, $p.corner.z) 'White'
+  Log '  Tip: to build where you stand, turn on coordinates (chat: /gamerule showcoordinates true),'
+  Log '  stand on the ground at the corner you want and type the "Position" numbers shown.'
+  $c = Prompt 'Press Enter to keep it, or type a new corner like  120 64 -35'
+  $nums = @([regex]::Matches($c, '-?\d+') | ForEach-Object { [int]$_.Value })
+  if ($nums.Count -ge 3) {
+    $prog.offset = @(($nums[0] - [int]$p.corner.x), ($nums[1] - [int]$p.corner.y), ($nums[2] - [int]$p.corner.z))
+    ShiftPlan $prog.offset[0] $prog.offset[1] $prog.offset[2]
+    Log ("Building at {0} {1} {2}." -f $nums[0], $nums[1], $nums[2]) 'Green'
+  }
+  # which block to start from
+  $sb = Prompt "Start at block 1? Press Enter, or type a block number (1-$($blocks.Count)) if earlier ones are already built"
+  if ($sb.Trim() -match '^\d+$' -and [int]$sb.Trim() -gt 1 -and [int]$sb.Trim() -le $blocks.Count) {
+    $prog.next = [int]$sb.Trim() - 1
+    $by = $blocks[$prog.next].y
+    $firstOfLevel = ($prog.next -eq 0) -or ($blocks[$prog.next - 1].y -ne $by)
+    $prog.levelsDone = @($levels | Where-Object { $_.y -lt $by -or ($_.y -eq $by -and -not $firstOfLevel) } | ForEach-Object { [int]$_.y })
+    $resuming = $true
+    Log "Starting at block $($prog.next + 1)." 'Green'
+  }
+}
+
 if ($Limit -lt 0 -and -not $Yes) {
-  $t = Read-Host 'Test run first? Enter how many blocks to build (e.g. 10), or press Enter for the whole song'
+  $t = Prompt 'Test run first? Enter how many blocks to build (e.g. 10), or press Enter for the whole song'
   if ($t.Trim() -match '^\d+$') { $Limit = [int]$t.Trim() }
+}
+if (-not $Step -and -not $Yes -and $Limit -gt 0 -and $Limit -le 20) {
+  if (Ask 'Step-by-step (press F8 before every action, to see exactly what happens)?' $false) { $Step = $true }
 }
 $stopAt = $blocks.Count
 if ($Limit -gt 0) { $stopAt = [math]::Min($blocks.Count, $prog.next + $Limit) }
@@ -309,6 +462,18 @@ Log '  - Chat key is T (start with -ChatKey to change it)'
 Log 'Then click into Minecraft and press F8. The builder takes over the keyboard and mouse: don''t touch them.' 'Yellow'
 Beep; WaitForKey $VK.F8
 EnsureMinecraft
+
+# how to type into Minecraft (found once by the typing test, then remembered)
+$inputFile = Join-Path $here 'input.json'
+if ($DryRun) { $script:input = @{ keys = 'vk'; text = 'type' } }
+elseif (-not $Retest -and (Test-Path $inputFile)) {
+  $saved = Get-Content $inputFile -Raw | ConvertFrom-Json
+  $script:input = @{ keys = $saved.keys; text = $saved.text }
+  Log "Typing method: $($saved.text) / $($saved.keys) (run with -Retest to test again)"
+} else {
+  $script:input = TypingTest
+  $script:input | ConvertTo-Json | Set-Content -Path $inputFile -Encoding UTF8
+}
 
 $fresh = ($prog.next -eq 0 -and $prog.levelsDone.Count -eq 0)
 if ($fresh -and $p.clear -and (Ask 'Clear the build space first (fills the box with air)? Only say yes if nothing there matters.' $false)) {
@@ -325,7 +490,7 @@ if (-not $Recalibrate -and (Test-Path $calFile)) {
 
 $startTime = Get-Date
 $builtThisRun = 0
-$justResumed = ($prog.next -gt 0)
+$justResumed = ($resuming -and $prog.next -gt 0)
 try {
   foreach ($lv in $levels) {
     if ($prog.levelsDone -notcontains $lv.y) {
