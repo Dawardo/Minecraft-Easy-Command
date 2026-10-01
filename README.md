@@ -1,31 +1,52 @@
-# Bedrock Dialogue Maker
+# Bedrock Music Maker
 
-A self-hosted web tool for building branching **Minecraft: Bedrock Edition** NPC dialogue for **one NPC**. It has no tags, no .mcpack, and `@p` is always the player.
+Turn an MP3 into **Minecraft: Bedrock Edition** command block `/playsound` commands, with the repeater delays, ready to copy and paste.
 
 ## Use it
 
-1. Double-click **`Start-Dialogue-Maker.bat`** (Windows). A small local server starts and your browser opens at `http://localhost:8765/`. It only needs the PowerShell that comes with Windows.
-2. **Build**: each scene is one dialogue box with up to 6 buttons. **“+ Button → new scene”** creates a branch in one click, and there's no limit on scenes or branches.
-3. **Test play**: click through the conversation in the browser.
-4. **Get commands**: download the scene file as a plain folder, drop it into `development_behavior_packs`, then paste two commands into chat.
+1. Double-click **`Start-Music-Maker.bat`** (Windows). A small local server starts and your browser opens at `http://localhost:8765/`. It only needs the PowerShell that comes with Windows. Your song never leaves your PC.
+2. Drop in an MP3 and pick the part you want (10–30 seconds is a good start, since every note is a command block).
+3. Choose the sound:
+   - **Detail**: *Simple tune* (most recognizable, fewest blocks), *Normal* or *Detailed*.
+   - **Layer 1: Melody**, always on (harp by default).
+   - **Layer 2: Extra bass** (bass by default) or off.
+   - **Layer 3: Drums** (`note.bd` kick, `note.snare`, `note.hat`), **Harmony** (a second note under the melody, bell by default) or off.
+   - Any layer can use any note block instrument. That's max 3 instruments, so max 3 command blocks per step.
+4. **Convert**, then **▶ Minecraft preview** to hear roughly what the note blocks will sound like next to **▶ Original**.
+5. Build it with **Copy next**: each click (or <kbd>Space</kbd>) copies the next command and tells you which repeater delay to set before it.
 
-Your work autosaves in the browser. Use **Project → Save project file** to keep a backup.
+## What you get
 
-## How it works in Bedrock
+```
+/playsound note.harp @a ~ ~ ~ 1 0.7071 1
+/playsound note.bass @a ~ ~ ~ 0.9 1.4142 0.9
+/playsound note.bd @a ~ ~ ~ 0.8 1 0.8
+```
 
-- The NPC's button commands run at the NPC, so `@e[type=npc,c=1]` (the nearest NPC) is the NPC itself, and `@p` is the player standing at it.
-- A branch button runs `/dialogue open @e[type=npc,c=1] @p <scene>`.
-- Setup is `/summon npc "Name" ~ ~ ~` followed by `/dialogue change @e[type=npc,c=1] <start scene>`.
-- “Remember progress” adds `/dialogue change @e[type=npc,c=1] <scene> @p`, so the NPC starts there next time for that player.
-- Bedrock only knows a scene name if it's written in a scene file (`dialogue/*.json`, `"minecraft:npc_dialogue"`, format 1.17). The page builds that file inside a normal behavior pack **folder** (no .mcpack). Put the folder in `com.mojang\development_behavior_packs` and turn it on in the world's Behavior Packs.
-- **Password wizard**: dialogue has no text input, so the code is entered with buttons, like a keypad. Each digit is its own scene, and wrong presses follow identical-looking decoy scenes, so players only learn they failed at the end.
+Bedrock syntax: `/playsound <sound> [player] [x y z] [volume] [pitch] [minimumVolume]`. Pitch is the note block pitch (0.5 to 2.0, two octaves per instrument). Each layer is moved by whole octaves so the tune keeps its shape and fits the instrument. With "Everyone" the last number (minimum volume) lets every player hear it wherever they are.
 
-Sources: [Microsoft Learn: NPC Dialogue Command](https://learn.microsoft.com/en-us/minecraft/creator/documents/npcdialogue), [microsoft/minecraft-samples npc_dialogue_sample](https://github.com/microsoft/minecraft-samples/tree/main/npc_dialogue_sample).
+### Build styles
 
-## If the .bat doesn't start the server
+- **Repeaters** (default): one redstone line, `button → dust → repeaters → dust → …`. Each step is a column under a piece of dust: the top block is *Impulse · Needs Redstone*, facing down, and extra layers go below it as *Chain · Always Active*, facing down. The page lists the repeaters between steps (each holds 1–4 ticks, 1 tick = 0.1 s).
+- **Chain blocks**: no redstone. One straight line of command blocks. The first is *Impulse · Needs Redstone*, the rest *Chain · Always Active*, using each block's *Delay in Ticks* (2 game ticks per repeater tick).
 
-It falls back to opening `web/index.html` directly, and everything still works.
+## How the converter listens
+
+It runs entirely in the browser with no libraries:
+- **Melody:** finds the strongest pitch at each moment, with octave-error protection, and ignores whatever the bass is playing.
+- **Bass:** read from a separate high-resolution low-frequency analysis.
+- **Drums:** found from sudden jumps in loudness in the low (kick), mid (snare, which must sound noisy) and high (hat) ranges.
+- **Timing:** note starts snap to sharp onsets, then everything is rounded to the 1- or 2-tick grid.
+
+Real songs with lots going on won't come out perfect. *Simple tune* plus the preview button is the quickest way to get something recognizable.
 
 ## Tests
 
-`node tests/ui.test.mjs` (needs the `playwright` package and Chromium) drives the real UI. It plays through branches and the password with right and wrong codes, builds a project plus a colour password through the UI, and checks the downloaded folder. Every button must use `@p`, contain no tags, and link to real scenes.
+`node tests/music.test.mjs` generates a song with known notes (melody, bass, kick/hat) and encodes it to MP3 (Python `lameenc`). It runs the song through the real page in headless Chromium, then checks:
+- every melody, bass and drum note matches exactly
+- the commands are valid and in range
+- the repeater ticks, chain delays, Copy next and the .txt download are right
+
+## Dialogue maker (paused)
+
+The earlier NPC dialogue tool is still at `http://localhost:8765/dialogue.html` (`tests/dialogue.test.mjs`).

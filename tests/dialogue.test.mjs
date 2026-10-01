@@ -22,7 +22,7 @@ const page = await browser.newPage({ acceptDownloads: true });
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
 page.on('dialog', d => d.accept());
-await page.goto(url);
+await page.goto(url + 'dialogue.html');
 
 // ---- example project loads and is valid ----
 const issues = await page.evaluate(() => BDM.validate().filter(i => i.level === 'err'));

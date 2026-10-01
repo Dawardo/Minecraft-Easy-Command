@@ -1,4 +1,4 @@
-# Tiny local web server for Bedrock Dialogue Maker.
+# Tiny local web server for Bedrock Music Maker (and the paused Dialogue Maker).
 # Uses only what ships with Windows (PowerShell + .NET HttpListener), so nothing needs installing.
 $ErrorActionPreference = 'Stop'
 
@@ -23,7 +23,7 @@ if (-not $listener) {
 }
 
 $url = "http://localhost:$port/"
-Write-Host "Bedrock Dialogue Maker is running at $url"
+Write-Host "Bedrock Music Maker is running at $url"
 Write-Host 'Your browser should open automatically. Close this window to stop the server.'
 Start-Process $url
 

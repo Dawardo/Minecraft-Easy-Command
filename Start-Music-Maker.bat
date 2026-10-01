@@ -1,7 +1,7 @@
 @echo off
-title Bedrock Dialogue Maker
+title Bedrock Music Maker
 cd /d "%~dp0"
-echo Starting Bedrock Dialogue Maker...
+echo Starting Bedrock Music Maker...
 echo (Keep this window open while you use the page. Close it to stop.)
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0server\server.ps1"
