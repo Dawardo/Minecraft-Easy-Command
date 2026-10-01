@@ -240,6 +240,16 @@ function TpAbove($b) { Chat ("/tp @s {0} {1} {2} 0 90" -f (Fmt ($b.x + 0.5)), (F
 # Right after chat closes Minecraft takes the mouse back and ignores the first click (like the first key
 # after chat opens). So: wait, wiggle the mouse a pixel, right-click, and right-click once more (a second
 # right-click on an open command block screen does nothing).
+# Closes (and saves) the command block screen. While a text box is being typed in, Esc only leaves the
+# box, so first click the scroll bar (outside the text boxes), then press Esc the way a keyboard does
+# (scan code, held a moment).
+function CloseBlock($scrollPt) {
+  LeftClick $scrollPt; Wait $T.click
+  Act 'esc (scan, held)'
+  if (-not $DryRun) { [Bdm.Win]::Key($VK.Esc, $false, $true); Start-Sleep -Milliseconds 120; [Bdm.Win]::Key($VK.Esc, $true, $true) }
+  Wait $T.close
+}
+
 function OpenBlock {
   StepPause 'right-click the block below you'
   Wait $T.beforeClick
@@ -260,7 +270,7 @@ function FillBlock($b) {
   TypeInto $cal.delay ([string]$b.delay) 7
   # close = save
   StepPause 'press Esc to close (and save) the command block'
-  Tap $VK.Esc; Wait $T.close
+  CloseBlock $cal.scroll
 }
 
 # ---------------------------------------------------------------- pause / stop / focus
@@ -340,7 +350,7 @@ function Calibrate($firstBlock) {
       if (Pressed $VK.F9) { throw 'STOP' }
       Start-Sleep -Milliseconds 30
     }
-    Tap $VK.Esc; Start-Sleep -Milliseconds 800
+    CloseBlock $scroll
     if ($ok) { break }
   }
   @{ scroll = $scroll; command = $command; delay = $delay } | ConvertTo-Json -Depth 5 | Set-Content -Path $calFile -Encoding UTF8
